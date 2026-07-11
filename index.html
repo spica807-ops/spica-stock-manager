@@ -93,6 +93,19 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const CATEGORIES = ["Chair", "Table", "Sofa", "Other"];
 const today = () => new Date().toISOString().slice(0, 10);
 
+function exportCsv(filename, rows) {
+  if (!rows.length) return;
+  const headers = Object.keys(rows[0]);
+  const escape = (v) => `"${String(v??"").replace(/"/g,'""')}"`;
+  const csv = [headers.join(","), ...rows.map(r => headers.map(h=>escape(r[h])).join(","))].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function makeSku(product, v) {
   const p = (product?.code || "GEN").toUpperCase();
   const c = (v.colorCode || "NA").toUpperCase();
@@ -312,7 +325,7 @@ function App({ username, role }) {
         </div>
 
         <div style={{ flex:1, padding:"28px 32px", minWidth:0 }}>
-          {tab==="dashboard" && <Dashboard products={products} variants={variants} orders={orders} totalAvailable={totalAvailable} totalBlocked={totalBlocked} lowStock={lowStock} negativeStock={negativeStock} productMap={productMap} />}
+          {tab==="dashboard" && <Dashboard products={products} variants={variants} orders={orders} movements={movements} available={available} totalAvailable={totalAvailable} totalBlocked={totalBlocked} lowStock={lowStock} negativeStock={negativeStock} productMap={productMap} />}
           {tab==="products" && <Products products={products} setProducts={setProducts} variants={variants} perms={perms} />}
           {tab==="variants" && <Variants products={products} variants={variants} setVariants={setVariants} stock={stock} setStock={setStock} perms={perms} />}
           {tab==="stock" && <StockLedger products={products} variants={variants} productMap={productMap} getStock={getStock} available={available} setOpening={setOpening} logMovement={logMovement} perms={perms} />}
@@ -336,18 +349,70 @@ function StatCard({ label, value, tone }) {
   );
 }
 
-function Dashboard({ products, variants, orders, totalAvailable, totalBlocked, lowStock, negativeStock, productMap }) {
+function Dashboard({ products, variants, orders, movements, available, totalAvailable, totalBlocked, lowStock, negativeStock, productMap }) {
+  const [q, setQ] = useState("");
+  const todayStr = today();
+  const todayMoves = movements.filter(m => m.date === todayStr);
+  const todayIn = todayMoves.filter(m=>m.type==="in").reduce((s,m)=>s+m.qty,0);
+  const todayOut = todayMoves.filter(m=>m.type==="out").reduce((s,m)=>s+m.qty,0);
+
+  const searchResults = q.trim() ? variants.filter(v => {
+    const s = q.trim().toLowerCase();
+    return v.sku.toLowerCase().includes(s) || (productMap[v.productId]?.name||"").toLowerCase().includes(s) || (v.colorCode||"").toLowerCase().includes(s);
+  }).slice(0, 8) : [];
+
   return (
     <div>
       <SectionHeader eyebrow="Overview" title="Today's stock position" />
+
+      <div className="card" style={{ padding:16, marginBottom:20 }}>
+        <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>Quick stock check</div>
+        <SearchBox value={q} onChange={setQ} placeholder="Type a SKU, product, or color…" />
+        {q.trim() && (
+          <div style={{ marginTop:12 }}>
+            {searchResults.length===0 && <div style={{ fontSize:13, color:C.sub }}>No matching SKU found.</div>}
+            {searchResults.map(v => {
+              const avail = available(v.id);
+              return (
+                <div key={v.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
+                  <span>
+                    <span style={{ fontFamily:FONT_MONO, fontSize:12 }}>{v.sku}</span>
+                    <span style={{ color:C.sub, marginLeft:8 }}>{productMap[v.productId]?.name||"—"}</span>
+                  </span>
+                  <span style={{ fontFamily:FONT_MONO, fontWeight:600, color: avail<0?C.rust:C.tealDeep }}>{avail} available</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginBottom:28 }}>
         <StatCard label="Products" value={products.length} tone="teal" />
         <StatCard label="Variants (SKUs)" value={variants.length} tone="teal" />
         <StatCard label="Available units" value={totalAvailable} tone="green" />
         <StatCard label="Blocked units" value={totalBlocked} tone="gold" />
+        <StatCard label="Today's inward" value={todayIn} tone="green" />
+        <StatCard label="Today's outward" value={todayOut} tone="rust" />
         <StatCard label="Open orders" value={orders.filter(o=>o.status!=="CONFIRMED"&&o.status!=="CANCELLED").length} tone="rust" />
       </div>
+
       <div style={{ display:"flex", gap:24, flexWrap:"wrap" }}>
+        <div style={{ flex:1, minWidth:300 }} className="card">
+          <div style={{ padding:18 }}>
+            <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep, marginBottom:10 }}>Today's movements</div>
+            {todayMoves.length===0 && <div style={{ fontSize:13, color:C.sub }}>No stock logged today yet.</div>}
+            {todayMoves.slice(0,8).map(m => {
+              const v = variants.find(x=>x.id===m.variantId);
+              return (
+                <div key={m.id} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
+                  <span>{productMap[v?.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v?.sku}</span></span>
+                  <span>{m.type==="in" ? <Badge tone="green">+{m.qty}</Badge> : <Badge tone="rust">-{m.qty}</Badge>}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
         <div style={{ flex:1, minWidth:300 }} className="card">
           <div style={{ padding:18 }}>
             <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep, marginBottom:10 }}>Low stock (5 or fewer)</div>
@@ -369,6 +434,7 @@ function Dashboard({ products, variants, orders, totalAvailable, totalBlocked, l
                 <span>{productMap[v.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v.sku}</span></span>
                 <Badge tone="rust">Over-blocked</Badge>
               </div>
+
             ))}
           </div>
         </div>
@@ -526,6 +592,23 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
     setMoveVariant(""); setMoveQty(1); setMoveNote("");
   };
 
+  const exportSnapshot = () => {
+    const rows = list.map(v => {
+      const s = getStock(v.id);
+      return {
+        SKU: v.sku,
+        Product: productMap[v.productId]?.name || "",
+        Category: productMap[v.productId]?.category || "",
+        Opening: s.opening||0,
+        In: s.in||0,
+        Out: s.out||0,
+        Blocked: s.blocked||0,
+        Available: available(v.id),
+      };
+    });
+    exportCsv(`stock-snapshot-${today()}.csv`, rows);
+  };
+
   return (
     <div>
       <SectionHeader eyebrow="Ledger" title="Stock ledger" action={
@@ -534,6 +617,7 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
           <select style={{width:160}} value={filterProduct} onChange={e=>setFilterProduct(e.target.value)}>
             <option value="">All products</option>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
+          <Btn variant="ghost" onClick={exportSnapshot}><i className="ti ti-download" style={{verticalAlign:-2,marginRight:4}}></i>Export CSV</Btn>
         </div>
       } />
 
@@ -592,6 +676,18 @@ function Reports({ movements, variantMap, productMap, products }) {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
 
+  const setPeriod = (kind) => {
+    const now = new Date();
+    let from = new Date(now);
+    if (kind === "day") { /* today only */ }
+    else if (kind === "week") { from.setDate(now.getDate() - 6); }
+    else if (kind === "month") { from = new Date(now.getFullYear(), now.getMonth(), 1); }
+    else if (kind === "year") { from = new Date(now.getFullYear(), 0, 1); }
+    else if (kind === "all") { setFromDate(""); setToDate(""); return; }
+    setFromDate(from.toISOString().slice(0,10));
+    setToDate(now.toISOString().slice(0,10));
+  };
+
   const filtered = movements.filter(m => {
     const v = variantMap[m.variantId];
     if (filterProduct && v?.productId !== filterProduct) return false;
@@ -605,6 +701,26 @@ function Reports({ movements, variantMap, productMap, products }) {
     return true;
   });
 
+  const periodIn = filtered.filter(m=>m.type==="in").reduce((s,m)=>s+m.qty,0);
+  const periodOut = filtered.filter(m=>m.type==="out").reduce((s,m)=>s+m.qty,0);
+
+  const exportPeriod = () => {
+    const rows = filtered.map(m => {
+      const v = variantMap[m.variantId];
+      return {
+        Date: m.date,
+        SKU: v?.sku || "",
+        Product: productMap[v?.productId]?.name || "",
+        Type: m.type === "in" ? "Inward" : "Outward",
+        Quantity: m.qty,
+        Note: m.note || "",
+        LoggedBy: m.loggedBy || "",
+      };
+    });
+    const label = fromDate || toDate ? `${fromDate||"start"}_to_${toDate||"now"}` : "all-time";
+    exportCsv(`stock-movements-${label}.csv`, rows);
+  };
+
   // group by date, newest first
   const byDate = {};
   filtered.forEach(m => { (byDate[m.date] = byDate[m.date] || []).push(m); });
@@ -613,6 +729,15 @@ function Reports({ movements, variantMap, productMap, products }) {
   return (
     <div>
       <SectionHeader eyebrow="Movements" title="Day-by-day inward and outward report" action={<SearchBox value={q} onChange={setQ} placeholder="Search SKU, product, note…" />} />
+
+      <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+        <Btn variant="ghost" onClick={()=>setPeriod("day")}>Today</Btn>
+        <Btn variant="ghost" onClick={()=>setPeriod("week")}>This week</Btn>
+        <Btn variant="ghost" onClick={()=>setPeriod("month")}>This month</Btn>
+        <Btn variant="ghost" onClick={()=>setPeriod("year")}>This year</Btn>
+        <Btn variant="ghost" onClick={()=>setPeriod("all")}>All time</Btn>
+      </div>
+
       <div style={{ display:"flex", gap:10, marginBottom:20, flexWrap:"wrap", alignItems:"flex-end" }}>
         <Field label="Product">
           <select style={{width:170}} value={filterProduct} onChange={e=>setFilterProduct(e.target.value)}>
@@ -621,9 +746,17 @@ function Reports({ movements, variantMap, productMap, products }) {
         </Field>
         <Field label="From"><input type="date" style={{width:150}} value={fromDate} onChange={e=>setFromDate(e.target.value)} /></Field>
         <Field label="To"><input type="date" style={{width:150}} value={toDate} onChange={e=>setToDate(e.target.value)} /></Field>
+        <Btn variant="primary" onClick={exportPeriod}><i className="ti ti-download" style={{verticalAlign:-2,marginRight:4}}></i>Export CSV</Btn>
       </div>
 
-      {dates.length===0 && <div style={{ color:C.sub, fontSize:13 }}>No stock movements logged yet — log one from the Stock ledger tab.</div>}
+      <div style={{ display:"flex", gap:14, marginBottom:20 }}>
+        <StatCard label="Total inward (period)" value={periodIn} tone="green" />
+        <StatCard label="Total outward (period)" value={periodOut} tone="rust" />
+        <StatCard label="Net change" value={periodIn-periodOut} tone="teal" />
+      </div>
+
+      {dates.length===0 && <div style={{ color:C.sub, fontSize:13 }}>No stock movements match this period.</div>}
+
 
       {dates.map(date => {
         const rows = byDate[date];
@@ -822,6 +955,17 @@ function Users({ users }) {
 }
 
 /* ---------- Root: auth gate ---------- */
+async function ensureSeeded() {
+  const snap = await db.collection("users").get();
+  if (snap.empty) {
+    const batch = db.batch();
+    Object.entries(SEED_ROLE_MAP).forEach(([username, role]) => {
+      batch.set(db.collection("users").doc(username), { role });
+    });
+    await batch.commit();
+  }
+}
+
 function Root() {
   const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
   const [role, setRole] = useState(undefined);
@@ -832,10 +976,13 @@ function Root() {
     if (!u) { setRole(undefined); return; }
     const uname = (u.email || "").split("@")[0];
     setUsername(uname);
-    const unsub = db.collection("users").doc(uname).onSnapshot((snap) => {
-      setRole(snap.exists ? snap.data().role : null);
+    let unsub = () => {};
+    ensureSeeded().finally(() => {
+      unsub = db.collection("users").doc(uname).onSnapshot((snap) => {
+        setRole(snap.exists ? snap.data().role : null);
+      });
     });
-    return unsub;
+    return () => unsub();
   }), []);
 
   if (user === undefined) return <div style={{padding:40}}>Loading…</div>;
@@ -856,4 +1003,3 @@ ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
 </script>
 </body>
 </html>
-

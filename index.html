@@ -57,14 +57,22 @@ firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
 
+// A second, separate Firebase connection used only when admin creates a new
+// login inside the app — this stops "create user" from signing the admin out.
+const secondaryApp = firebase.initializeApp(firebaseConfig, "secondary");
+const secondaryAuth = secondaryApp.auth();
+
 /* =========================================================================
-   2) MAP EACH USERNAME TO A ROLE
-   In Firebase console > Authentication > Users, create each user with the
-   email format  username@spica.internal  (e.g. admin@spica.internal).
-   People will just type "admin" (not the full email) on the login screen.
+   2) USERNAME <-> ROLE
+   Roles now live in Firestore (collection "users") so the admin can add,
+   edit, or remove people from inside the app itself — no code edits needed.
+   The 3 accounts below are only used once, to seed Firestore the first time
+   the app runs. After that, manage everyone from the "Users" tab as admin.
+   In Firebase console > Authentication, each username is stored as
+   username@spica.internal (e.g. admin@spica.internal).
    ========================================================================= */
 const USER_DOMAIN = "spica.internal";
-const ROLE_MAP = {
+const SEED_ROLE_MAP = {
   "admin": "admin",
   "warehouse": "warehouse",
   "sales": "sales"
@@ -72,6 +80,7 @@ const ROLE_MAP = {
 </script>
 
 <script type="text/babel">
+
 const { useState, useEffect, useCallback, useMemo } = React;
 
 const FONT_DISPLAY = "'Fraunces', Georgia, serif";
@@ -82,6 +91,7 @@ const C = {
 };
 const uid = () => Math.random().toString(36).slice(2, 9);
 const CATEGORIES = ["Chair", "Table", "Sofa", "Other"];
+const today = () => new Date().toISOString().slice(0, 10);
 
 function makeSku(product, v) {
   const p = (product?.code || "GEN").toUpperCase();
@@ -112,6 +122,31 @@ function useSyncedDoc(name, fallback) {
   return [value, save, ready];
 }
 
+/* Users collection: one Firestore doc per username, holding { role } */
+function useUsers() {
+  const [users, setUsers] = useState({});
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const unsub = db.collection("users").onSnapshot(async (snap) => {
+      if (snap.empty) {
+        // first ever run — seed the 3 known accounts so login keeps working
+        const batch = db.batch();
+        Object.entries(SEED_ROLE_MAP).forEach(([username, role]) => {
+          batch.set(db.collection("users").doc(username), { role });
+        });
+        await batch.commit();
+        return;
+      }
+      const map = {};
+      snap.forEach((d) => { map[d.id] = d.data().role; });
+      setUsers(map);
+      setReady(true);
+    });
+    return unsub;
+  }, []);
+  return [users, ready];
+}
+
 /* ---------- small UI atoms ---------- */
 function Badge({ tone, children }) {
   const tones = { gold:{bg:C.goldSoft,fg:"#6B5310"}, teal:{bg:C.tealSoft,fg:C.tealDeep}, rust:{bg:C.rustSoft,fg:"#7A2D18"}, green:{bg:C.greenSoft,fg:C.green} };
@@ -138,6 +173,14 @@ function SectionHeader({ eyebrow, title, action }) {
         <h2 style={{ fontFamily:FONT_DISPLAY, fontWeight:600, fontSize:24, margin:0, color:C.tealDeep }}>{title}</h2>
       </div>
       {action}
+    </div>
+  );
+}
+function SearchBox({ value, onChange, placeholder }) {
+  return (
+    <div style={{ position:"relative", width:220 }}>
+      <i className="ti ti-search" style={{ position:"absolute", left:10, top:9, fontSize:15, color:C.sub }} aria-hidden="true"></i>
+      <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder||"Search…"} style={{ width:"100%", paddingLeft:32 }} />
     </div>
   );
 }
@@ -182,21 +225,24 @@ function Login() {
 }
 
 /* ---------- Main App ---------- */
-function App({ user, role }) {
+function App({ username, role }) {
   const [tab, setTab] = useState("dashboard");
   const [products, setProducts, productsReady] = useSyncedDoc("products", []);
   const [variants, setVariants, variantsReady] = useSyncedDoc("variants", []);
   const [stock, setStock, stockReady] = useSyncedDoc("stock", {});
   const [orders, setOrders, ordersReady] = useSyncedDoc("orders", []);
-  const ready = productsReady && variantsReady && stockReady && ordersReady;
+  const [movements, setMovements, movementsReady] = useSyncedDoc("movements", []);
+  const [users, usersReady] = useUsers();
+  const ready = productsReady && variantsReady && stockReady && ordersReady && movementsReady;
 
   const perms = {
     isAdmin: role === "admin",
-    canEditCatalogue: role === "admin",              // add/delete products
+    canEditCatalogue: role === "admin",
     canEditVariants: role === "admin" || role === "warehouse",
     canEditStock: role === "admin" || role === "warehouse",
     canManageOrders: role === "admin" || role === "warehouse",
-    canDelete: role === "admin",                       // warehouse can add/edit but not delete
+    canDelete: role === "admin",
+    canManageUsers: role === "admin",
     readOnly: role === "sales",
   };
 
@@ -204,9 +250,22 @@ function App({ user, role }) {
   const variantMap = useMemo(() => Object.fromEntries(variants.map(v => [v.id, v])), [variants]);
   const getStock = useCallback((id) => stock[id] || {opening:0,in:0,out:0,blocked:0}, [stock]);
   const available = useCallback((id) => { const s = getStock(id); return (s.opening||0)+(s.in||0)-(s.out||0)-(s.blocked||0); }, [getStock]);
-  const setStockField = (id, field, value) => {
+
+  const setOpening = (id, value) => {
     if (!perms.canEditStock) return;
-    setStock({ ...stock, [id]: { ...(stock[id]||{opening:0,in:0,out:0,blocked:0}), [field]: Number(value)||0 } });
+    setStock({ ...stock, [id]: { ...(stock[id]||{opening:0,in:0,out:0,blocked:0}), opening: Number(value)||0 } });
+  };
+
+  // Logs a dated in/out movement AND updates the running total — this is what
+  // powers the day-by-day report.
+  const logMovement = (variantId, type, qty, date, note) => {
+    if (!perms.canEditStock || !variantId || !qty) return;
+    const q = Number(qty);
+    if (q <= 0) return;
+    const entry = { id: uid(), variantId, type, qty: q, date: date || today(), note: note||"", loggedBy: username, ts: Date.now() };
+    setMovements([entry, ...movements]);
+    const cur = stock[variantId] || { opening:0, in:0, out:0, blocked:0 };
+    setStock({ ...stock, [variantId]: { ...cur, [type]: (cur[type]||0) + q } });
   };
 
   if (!ready) return <div style={{padding:40}}>Loading…</div>;
@@ -222,7 +281,9 @@ function App({ user, role }) {
     { id:"variants", label:"Variants", icon:"ti-palette" },
     { id:"stock", label:"Stock ledger", icon:"ti-clipboard-list" },
     { id:"orders", label:"Orders & blocking", icon:"ti-lock" },
+    { id:"reports", label:"Daily reports", icon:"ti-calendar-stats" },
   ];
+  if (perms.canManageUsers) tabs.push({ id:"users", label:"Users", icon:"ti-users" });
 
   const roleLabel = { admin:"Admin", warehouse:"Warehouse manager", sales:"Sales (view only)" }[role] || role;
 
@@ -244,7 +305,7 @@ function App({ user, role }) {
             </button>
           ))}
           <div style={{ marginTop:"auto", paddingTop:20, borderTop:"1px solid rgba(255,255,255,0.15)" }}>
-            <div style={{ fontSize:12, color:"#fff", fontWeight:500 }}>{user.email}</div>
+            <div style={{ fontSize:12, color:"#fff", fontWeight:500 }}>{username}</div>
             <div style={{ fontSize:11, color:C.gold, marginBottom:10 }}>{roleLabel}</div>
             <button onClick={()=>auth.signOut()} style={{ width:"100%", background:"transparent", border:"1px solid rgba(255,255,255,0.3)", color:"#fff" }}>Sign out</button>
           </div>
@@ -254,8 +315,10 @@ function App({ user, role }) {
           {tab==="dashboard" && <Dashboard products={products} variants={variants} orders={orders} totalAvailable={totalAvailable} totalBlocked={totalBlocked} lowStock={lowStock} negativeStock={negativeStock} productMap={productMap} />}
           {tab==="products" && <Products products={products} setProducts={setProducts} variants={variants} perms={perms} />}
           {tab==="variants" && <Variants products={products} variants={variants} setVariants={setVariants} stock={stock} setStock={setStock} perms={perms} />}
-          {tab==="stock" && <StockLedger products={products} variants={variants} productMap={productMap} getStock={getStock} available={available} setStockField={setStockField} perms={perms} />}
+          {tab==="stock" && <StockLedger products={products} variants={variants} productMap={productMap} getStock={getStock} available={available} setOpening={setOpening} logMovement={logMovement} perms={perms} />}
           {tab==="orders" && <Orders variants={variants} variantMap={variantMap} orders={orders} setOrders={setOrders} stock={stock} setStock={setStock} available={available} perms={perms} />}
+          {tab==="reports" && <Reports movements={movements} variantMap={variantMap} productMap={productMap} products={products} />}
+          {tab==="users" && perms.canManageUsers && <Users users={users} />}
         </div>
       </div>
     </div>
@@ -316,16 +379,22 @@ function Dashboard({ products, variants, orders, totalAvailable, totalBlocked, l
 
 function Products({ products, setProducts, variants, perms }) {
   const [name, setName] = useState(""); const [code, setCode] = useState(""); const [category, setCategory] = useState("Chair");
+  const [q, setQ] = useState("");
   const add = () => {
     if (!perms.canEditCatalogue || !name.trim() || !code.trim()) return;
     setProducts([...products, { id:uid(), name:name.trim(), code:code.trim().toUpperCase(), category }]);
     setName(""); setCode("");
   };
   const remove = (id) => { if (!perms.canDelete) return; setProducts(products.filter(x=>x.id!==id)); };
+  const filtered = products.filter(p => {
+    const s = q.trim().toLowerCase();
+    if (!s) return true;
+    return p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s) || (p.category||"").toLowerCase().includes(s);
+  });
 
   return (
     <div>
-      <SectionHeader eyebrow="Catalogue" title="Products" />
+      <SectionHeader eyebrow="Catalogue" title="Products" action={<SearchBox value={q} onChange={setQ} placeholder="Search products…" />} />
       {perms.canEditCatalogue && (
         <div style={{ display:"flex", gap:10, marginBottom:20, alignItems:"flex-end", flexWrap:"wrap" }}>
           <Field label="Product name"><input style={{width:220}} value={name} onChange={e=>setName(e.target.value)} placeholder="Sofa 3-seater" /></Field>
@@ -343,8 +412,8 @@ function Products({ products, setProducts, variants, perms }) {
         <table>
           <thead><tr style={{background:C.tealSoft}}><th>Product</th><th>Code</th><th>Category</th><th>Variants</th><th></th></tr></thead>
           <tbody>
-            {products.length===0 && <tr><td colSpan={5} style={{padding:18,color:C.sub,textAlign:"center"}}>No products yet.</td></tr>}
-            {products.map(p => (
+            {filtered.length===0 && <tr><td colSpan={5} style={{padding:18,color:C.sub,textAlign:"center"}}>{products.length===0 ? "No products yet." : "No products match your search."}</td></tr>}
+            {filtered.map(p => (
               <tr key={p.id} style={{borderTop:`1px solid ${C.line}`}}>
                 <td>{p.name}</td><td style={{fontFamily:FONT_MONO}}>{p.code}</td>
                 <td><Badge tone="teal">{p.category||"Other"}</Badge></td>
@@ -365,6 +434,7 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
   const [productId, setProductId] = useState(""); const [colorCode, setColorCode] = useState("");
   const [seatColor, setSeatColor] = useState(""); const [headrest, setHeadrest] = useState("No");
   const [size, setSize] = useState(""); const [opening, setOpening] = useState(0);
+  const [q, setQ] = useState("");
   const selectedProduct = products.find(p=>p.id===productId);
   const isChair = selectedProduct?.category === "Chair";
 
@@ -377,10 +447,16 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
     setColorCode(""); setSeatColor(""); setHeadrest("No"); setSize(""); setOpening(0);
   };
   const remove = (id) => { if (!perms.canDelete) return; setVariants(variants.filter(v=>v.id!==id)); };
+  const filtered = variants.filter(v => {
+    const s = q.trim().toLowerCase();
+    if (!s) return true;
+    const p = products.find(x=>x.id===v.productId);
+    return v.sku.toLowerCase().includes(s) || (p?.name||"").toLowerCase().includes(s) || (v.colorCode||"").toLowerCase().includes(s) || (v.size||"").toLowerCase().includes(s);
+  });
 
   return (
     <div>
-      <SectionHeader eyebrow="Catalogue" title="Variants" />
+      <SectionHeader eyebrow="Catalogue" title="Variants" action={<SearchBox value={q} onChange={setQ} placeholder="Search SKU, color, size…" />} />
       {products.length===0 ? <div style={{color:C.sub,fontSize:13}}>Add a product first.</div> : (
         <>
           {perms.canEditVariants && (
@@ -404,8 +480,8 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
             <table>
               <thead><tr style={{background:C.tealSoft}}><th>SKU</th><th>Product</th><th>Category</th><th>Color</th><th>Seat</th><th>Headrest</th><th>Size</th><th></th></tr></thead>
               <tbody>
-                {variants.length===0 && <tr><td colSpan={8} style={{padding:18,color:C.sub,textAlign:"center"}}>No variants yet.</td></tr>}
-                {variants.map(v => {
+                {filtered.length===0 && <tr><td colSpan={8} style={{padding:18,color:C.sub,textAlign:"center"}}>{variants.length===0 ? "No variants yet." : "No variants match your search."}</td></tr>}
+                {filtered.map(v => {
                   const p = products.find(x=>x.id===v.productId); const chair = p?.category==="Chair";
                   return (
                     <tr key={v.id} style={{borderTop:`1px solid ${C.line}`}}>
@@ -429,32 +505,74 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
   );
 }
 
-function StockLedger({ products, variants, productMap, getStock, available, setStockField, perms }) {
+function StockLedger({ products, variants, productMap, getStock, available, setOpening, logMovement, perms }) {
   const [filterProduct, setFilterProduct] = useState("");
-  const list = variants.filter(v => !filterProduct || v.productId===filterProduct);
+  const [q, setQ] = useState("");
+  const [moveVariant, setMoveVariant] = useState("");
+  const [moveType, setMoveType] = useState("in");
+  const [moveQty, setMoveQty] = useState(1);
+  const [moveDate, setMoveDate] = useState(today());
+  const [moveNote, setMoveNote] = useState("");
+
+  const list = variants.filter(v => {
+    if (filterProduct && v.productId !== filterProduct) return false;
+    const s = q.trim().toLowerCase();
+    if (!s) return true;
+    return v.sku.toLowerCase().includes(s) || (productMap[v.productId]?.name||"").toLowerCase().includes(s);
+  });
+
+  const submitMove = () => {
+    logMovement(moveVariant, moveType, moveQty, moveDate, moveNote);
+    setMoveVariant(""); setMoveQty(1); setMoveNote("");
+  };
+
   return (
     <div>
       <SectionHeader eyebrow="Ledger" title="Stock ledger" action={
-        <Field label="Filter by product">
-          <select style={{width:180}} value={filterProduct} onChange={e=>setFilterProduct(e.target.value)}>
+        <div style={{ display:"flex", gap:10 }}>
+          <SearchBox value={q} onChange={setQ} placeholder="Search SKU or product…" />
+          <select style={{width:160}} value={filterProduct} onChange={e=>setFilterProduct(e.target.value)}>
             <option value="">All products</option>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
-        </Field>
+        </div>
       } />
+
+      {perms.canEditStock && (
+        <div className="card" style={{ padding:16, marginBottom:20 }}>
+          <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>Log a stock movement</div>
+          <div style={{ display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap" }}>
+            <Field label="Variant (SKU)">
+              <select style={{width:220}} value={moveVariant} onChange={e=>setMoveVariant(e.target.value)}>
+                <option value="">Select</option>{variants.map(v=><option key={v.id} value={v.id}>{v.sku}</option>)}
+              </select>
+            </Field>
+            <Field label="Type">
+              <select style={{width:100}} value={moveType} onChange={e=>setMoveType(e.target.value)}>
+                <option value="in">Inward</option><option value="out">Outward</option>
+              </select>
+            </Field>
+            <Field label="Quantity"><input type="number" min="1" style={{width:90}} value={moveQty} onChange={e=>setMoveQty(e.target.value)} /></Field>
+            <Field label="Date"><input type="date" style={{width:150}} value={moveDate} onChange={e=>setMoveDate(e.target.value)} /></Field>
+            <Field label="Note (optional)"><input style={{width:180}} value={moveNote} onChange={e=>setMoveNote(e.target.value)} placeholder="PO number, vendor…" /></Field>
+            <Btn variant="primary" onClick={submitMove}><i className="ti ti-plus" style={{verticalAlign:-2,marginRight:4}}></i>Log movement</Btn>
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <table>
           <thead><tr style={{background:C.tealSoft}}><th>SKU</th><th>Product</th><th style={{textAlign:"right"}}>Opening</th><th style={{textAlign:"right"}}>In</th><th style={{textAlign:"right"}}>Out</th><th style={{textAlign:"right"}}>Blocked</th><th style={{textAlign:"right"}}>Available</th></tr></thead>
           <tbody>
-            {list.length===0 && <tr><td colSpan={7} style={{padding:18,color:C.sub,textAlign:"center"}}>No stock rows.</td></tr>}
+            {list.length===0 && <tr><td colSpan={7} style={{padding:18,color:C.sub,textAlign:"center"}}>No stock rows match.</td></tr>}
             {list.map(v => {
               const s = getStock(v.id); const avail = available(v.id); const hasBlock = (s.blocked||0) > 0;
               return (
                 <tr key={v.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: hasBlock?`3px dashed ${C.gold}`:"3px solid transparent"}}>
                   <td style={{fontFamily:FONT_MONO,fontSize:12}}>{v.sku}</td>
                   <td>{productMap[v.productId]?.name||"—"}</td>
-                  <td style={{textAlign:"right"}}><input type="number" disabled={!perms.canEditStock} value={s.opening} onChange={e=>setStockField(v.id,"opening",e.target.value)} style={{width:64,textAlign:"right",padding:"5px 6px"}} /></td>
-                  <td style={{textAlign:"right"}}><input type="number" disabled={!perms.canEditStock} value={s.in} onChange={e=>setStockField(v.id,"in",e.target.value)} style={{width:64,textAlign:"right",padding:"5px 6px"}} /></td>
-                  <td style={{textAlign:"right"}}><input type="number" disabled={!perms.canEditStock} value={s.out} onChange={e=>setStockField(v.id,"out",e.target.value)} style={{width:64,textAlign:"right",padding:"5px 6px"}} /></td>
+                  <td style={{textAlign:"right"}}><input type="number" disabled={!perms.canEditStock} value={s.opening} onChange={e=>setOpening(v.id,e.target.value)} style={{width:64,textAlign:"right",padding:"5px 6px"}} /></td>
+                  <td style={{textAlign:"right",fontFamily:FONT_MONO,color:C.green}}>{s.in||0}</td>
+                  <td style={{textAlign:"right",fontFamily:FONT_MONO,color:C.rust}}>{s.out||0}</td>
                   <td style={{textAlign:"right",fontFamily:FONT_MONO,color:hasBlock?"#6B5310":C.sub}}>{s.blocked||0}</td>
                   <td style={{textAlign:"right",fontFamily:FONT_MONO,fontWeight:600,color: avail<0?C.rust:C.tealDeep}}>{avail}</td>
                 </tr>
@@ -463,7 +581,84 @@ function StockLedger({ products, variants, productMap, getStock, available, setS
           </tbody>
         </table>
       </div>
-      <div style={{fontSize:12,color:C.sub,marginTop:10}}>Available = opening + in − out − blocked.</div>
+      <div style={{fontSize:12,color:C.sub,marginTop:10}}>Available = opening + in − out − blocked. In/Out totals come from logged movements above — see "Daily reports" for the day-by-day breakdown.</div>
+    </div>
+  );
+}
+
+function Reports({ movements, variantMap, productMap, products }) {
+  const [filterProduct, setFilterProduct] = useState("");
+  const [q, setQ] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+
+  const filtered = movements.filter(m => {
+    const v = variantMap[m.variantId];
+    if (filterProduct && v?.productId !== filterProduct) return false;
+    if (fromDate && m.date < fromDate) return false;
+    if (toDate && m.date > toDate) return false;
+    const s = q.trim().toLowerCase();
+    if (s) {
+      const hay = `${v?.sku||""} ${productMap[v?.productId]?.name||""} ${m.note||""}`.toLowerCase();
+      if (!hay.includes(s)) return false;
+    }
+    return true;
+  });
+
+  // group by date, newest first
+  const byDate = {};
+  filtered.forEach(m => { (byDate[m.date] = byDate[m.date] || []).push(m); });
+  const dates = Object.keys(byDate).sort((a,b)=>b.localeCompare(a));
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Movements" title="Day-by-day inward and outward report" action={<SearchBox value={q} onChange={setQ} placeholder="Search SKU, product, note…" />} />
+      <div style={{ display:"flex", gap:10, marginBottom:20, flexWrap:"wrap", alignItems:"flex-end" }}>
+        <Field label="Product">
+          <select style={{width:170}} value={filterProduct} onChange={e=>setFilterProduct(e.target.value)}>
+            <option value="">All products</option>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        <Field label="From"><input type="date" style={{width:150}} value={fromDate} onChange={e=>setFromDate(e.target.value)} /></Field>
+        <Field label="To"><input type="date" style={{width:150}} value={toDate} onChange={e=>setToDate(e.target.value)} /></Field>
+      </div>
+
+      {dates.length===0 && <div style={{ color:C.sub, fontSize:13 }}>No stock movements logged yet — log one from the Stock ledger tab.</div>}
+
+      {dates.map(date => {
+        const rows = byDate[date];
+        const totalIn = rows.filter(r=>r.type==="in").reduce((s,r)=>s+r.qty,0);
+        const totalOut = rows.filter(r=>r.type==="out").reduce((s,r)=>s+r.qty,0);
+        return (
+          <div key={date} className="card" style={{ marginBottom:16 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"12px 16px", background:C.tealSoft }}>
+              <div style={{ fontFamily:FONT_DISPLAY, fontWeight:600, fontSize:15, color:C.tealDeep }}>{date}</div>
+              <div style={{ display:"flex", gap:8 }}>
+                <Badge tone="green">In {totalIn}</Badge>
+                <Badge tone="rust">Out {totalOut}</Badge>
+              </div>
+            </div>
+            <table>
+              <thead><tr><th>SKU</th><th>Product</th><th>Type</th><th style={{textAlign:"right"}}>Qty</th><th>Note</th><th>Logged by</th></tr></thead>
+              <tbody>
+                {rows.map(m => {
+                  const v = variantMap[m.variantId];
+                  return (
+                    <tr key={m.id} style={{borderTop:`1px solid ${C.line}`}}>
+                      <td style={{fontFamily:FONT_MONO,fontSize:12}}>{v?.sku||"—"}</td>
+                      <td>{productMap[v?.productId]?.name||"—"}</td>
+                      <td>{m.type==="in" ? <Badge tone="green">Inward</Badge> : <Badge tone="rust">Outward</Badge>}</td>
+                      <td style={{textAlign:"right",fontFamily:FONT_MONO}}>{m.qty}</td>
+                      <td style={{color:C.sub}}>{m.note||"—"}</td>
+                      <td style={{color:C.sub}}>{m.loggedBy}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -471,15 +666,16 @@ function StockLedger({ products, variants, productMap, getStock, available, setS
 function Orders({ variants, variantMap, orders, setOrders, stock, setStock, available, perms }) {
   const [customer, setCustomer] = useState(""); const [variantId, setVariantId] = useState("");
   const [qty, setQty] = useState(1); const [error, setError] = useState("");
+  const [q, setQ] = useState("");
 
   const createOrder = () => {
     setError("");
     if (!perms.canManageOrders || !customer.trim() || !variantId || !qty) return;
-    const q = Number(qty); if (q<=0) return;
-    if (available(variantId) < q) { setError("Not enough available stock to block that quantity."); return; }
-    const order = { id:uid(), customer:customer.trim(), date:new Date().toISOString().slice(0,10), status:"BLOCKED", items:[{variantId,qty:q}] };
+    const qn = Number(qty); if (qn<=0) return;
+    if (available(variantId) < qn) { setError("Not enough available stock to block that quantity."); return; }
+    const order = { id:uid(), customer:customer.trim(), date:today(), status:"BLOCKED", items:[{variantId,qty:qn}] };
     setOrders([order, ...orders]);
-    setStock({ ...stock, [variantId]: { ...(stock[variantId]||{opening:0,in:0,out:0,blocked:0}), blocked:(stock[variantId]?.blocked||0)+q } });
+    setStock({ ...stock, [variantId]: { ...(stock[variantId]||{opening:0,in:0,out:0,blocked:0}), blocked:(stock[variantId]?.blocked||0)+qn } });
     setCustomer(""); setVariantId(""); setQty(1);
   };
   const releaseOrder = (order) => {
@@ -497,10 +693,16 @@ function Orders({ variants, variantMap, orders, setOrders, stock, setStock, avai
     setStock(next);
   };
   const toneFor = (s) => s==="BLOCKED"?"gold":s==="CONFIRMED"?"green":s==="RELEASED"?"teal":"rust";
+  const filteredOrders = orders.filter(o => {
+    const s = q.trim().toLowerCase();
+    if (!s) return true;
+    const sku = variantMap[o.items[0].variantId]?.sku || "";
+    return o.customer.toLowerCase().includes(s) || sku.toLowerCase().includes(s);
+  });
 
   return (
     <div>
-      <SectionHeader eyebrow="Fulfilment" title="Orders & stock blocking" />
+      <SectionHeader eyebrow="Fulfilment" title="Orders & stock blocking" action={<SearchBox value={q} onChange={setQ} placeholder="Search customer or SKU…" />} />
       {perms.canManageOrders && (
         <div style={{ display:"flex", gap:10, marginBottom:10, alignItems:"flex-end", flexWrap:"wrap" }}>
           <Field label="Customer"><input style={{width:180}} value={customer} onChange={e=>setCustomer(e.target.value)} placeholder="Customer name" /></Field>
@@ -518,8 +720,8 @@ function Orders({ variants, variantMap, orders, setOrders, stock, setStock, avai
         <table>
           <thead><tr style={{background:C.tealSoft}}><th>Customer</th><th>SKU</th><th style={{textAlign:"right"}}>Qty</th><th>Date</th><th>Status</th><th></th></tr></thead>
           <tbody>
-            {orders.length===0 && <tr><td colSpan={6} style={{padding:18,color:C.sub,textAlign:"center"}}>No orders yet.</td></tr>}
-            {orders.map(o => (
+            {filteredOrders.length===0 && <tr><td colSpan={6} style={{padding:18,color:C.sub,textAlign:"center"}}>{orders.length===0 ? "No orders yet." : "No orders match your search."}</td></tr>}
+            {filteredOrders.map(o => (
               <tr key={o.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: o.status==="BLOCKED"?`3px dashed ${C.gold}`:"3px solid transparent"}}>
                 <td>{o.customer}</td>
                 <td style={{fontFamily:FONT_MONO,fontSize:12}}>{variantMap[o.items[0].variantId]?.sku||"—"}</td>
@@ -541,28 +743,117 @@ function Orders({ variants, variantMap, orders, setOrders, stock, setStock, avai
   );
 }
 
+function Users({ users }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState("sales");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const addUser = async () => {
+    setMsg(""); setBusy(true);
+    const uname = username.trim().toLowerCase();
+    if (!uname || password.length < 6) {
+      setMsg("Username required, password needs at least 6 characters.");
+      setBusy(false);
+      return;
+    }
+    const fakeEmail = `${uname}@${USER_DOMAIN}`;
+    try {
+      await secondaryAuth.createUserWithEmailAndPassword(fakeEmail, password);
+      await db.collection("users").doc(uname).set({ role });
+      await secondaryAuth.signOut();
+      setMsg(`${uname} added as ${role}.`);
+      setUsername(""); setPassword("");
+    } catch (err) {
+      setMsg(err.message || "Could not create user.");
+    }
+    setBusy(false);
+  };
+
+  const revoke = async (uname) => {
+    if (uname === "admin") { setMsg("Can't revoke the main admin account from here."); return; }
+    await db.collection("users").doc(uname).delete();
+  };
+
+  const changeRole = async (uname, newRole) => {
+    await db.collection("users").doc(uname).set({ role: newRole });
+  };
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Access" title="Users" />
+      <div className="card" style={{ padding:16, marginBottom:20 }}>
+        <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>Add a new login</div>
+        <div style={{ display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap" }}>
+          <Field label="Username"><input style={{width:160}} value={username} onChange={e=>setUsername(e.target.value)} placeholder="newuser" /></Field>
+          <Field label="Password"><input type="text" style={{width:160}} value={password} onChange={e=>setPassword(e.target.value)} placeholder="at least 6 characters" /></Field>
+          <Field label="Role">
+            <select style={{width:150}} value={role} onChange={e=>setRole(e.target.value)}>
+              <option value="admin">Admin</option><option value="warehouse">Warehouse manager</option><option value="sales">Sales (view only)</option>
+            </select>
+          </Field>
+          <Btn variant="primary" disabled={busy} onClick={addUser}><i className="ti ti-plus" style={{verticalAlign:-2,marginRight:4}}></i>Add user</Btn>
+        </div>
+        {msg && <div style={{ fontSize:12, color: msg.includes("added") ? C.green : C.rust, marginTop:10 }}>{msg}</div>}
+      </div>
+
+      <div className="card">
+        <table>
+          <thead><tr style={{background:C.tealSoft}}><th>Username</th><th>Role</th><th></th></tr></thead>
+          <tbody>
+            {Object.entries(users).map(([uname, r]) => (
+              <tr key={uname} style={{borderTop:`1px solid ${C.line}`}}>
+                <td>{uname}</td>
+                <td>
+                  <select value={r} onChange={e=>changeRole(uname, e.target.value)} style={{ padding:"5px 8px" }}>
+                    <option value="admin">Admin</option><option value="warehouse">Warehouse manager</option><option value="sales">Sales (view only)</option>
+                  </select>
+                </td>
+                <td style={{textAlign:"right"}}><Btn variant="danger" onClick={()=>revoke(uname)}>Revoke access</Btn></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{fontSize:12,color:C.sub,marginTop:10}}>Revoking access removes their app permissions immediately. Their login still technically exists in Firebase Authentication — delete it there too if you want it fully gone.</div>
+    </div>
+  );
+}
+
 /* ---------- Root: auth gate ---------- */
 function Root() {
   const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
-  useEffect(() => auth.onAuthStateChanged(setUser), []);
+  const [role, setRole] = useState(undefined);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => auth.onAuthStateChanged((u) => {
+    setUser(u);
+    if (!u) { setRole(undefined); return; }
+    const uname = (u.email || "").split("@")[0];
+    setUsername(uname);
+    const unsub = db.collection("users").doc(uname).onSnapshot((snap) => {
+      setRole(snap.exists ? snap.data().role : null);
+    });
+    return unsub;
+  }), []);
 
   if (user === undefined) return <div style={{padding:40}}>Loading…</div>;
   if (user === null) return <Login />;
-
-  const username = (user.email || "").split("@")[0];
-  const role = ROLE_MAP[username] || null;
+  if (role === undefined) return <div style={{padding:40}}>Loading…</div>;
   if (!role) {
     return (
       <div style={{ padding:40 }}>
-        <p>Your account ({username}) isn't assigned a role yet. Ask the admin to add your username to ROLE_MAP in the code.</p>
+        <p>Your account ({username}) isn't assigned a role yet. Ask the admin to add you from the Users tab.</p>
         <Btn onClick={()=>auth.signOut()}>Sign out</Btn>
       </div>
     );
   }
-  return <App user={{ email: username }} role={role} />;
+  return <App username={username} role={role} />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
 </script>
 </body>
 </html>
+

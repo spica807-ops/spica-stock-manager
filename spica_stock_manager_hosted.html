@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Spica Modular — Stock Manager</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.44.0/iconfont/tabler-icons.min.css" />
+<style>
+  :root {
+    --bg:#FAF7F0; --surface:#FFFFFF; --ink:#221F1A; --sub:#6B6459;
+    --teal:#0F3D3E; --tealDeep:#0A2B2C; --gold:#B8912E; --goldSoft:#F1E4C2;
+    --tealSoft:#E1EEEC; --rust:#B3492B; --rustSoft:#F6E2DA; --green:#3F6B3F;
+    --greenSoft:#E4EEE0; --line:#E4DFD3;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:'Inter',system-ui,sans-serif; }
+  input, select, button { font-family:'Inter',system-ui,sans-serif; font-size:13px; }
+  input, select {
+    padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--ink); outline:none;
+  }
+  button { cursor:pointer; padding:8px 14px; border-radius:6px; font-weight:600; border:1px solid transparent; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { padding:10px 14px; font-weight:600; color:var(--tealDeep); text-align:left; }
+  td { padding:10px 14px; }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .badge { font-size:11px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; padding:3px 8px; border-radius:4px; white-space:nowrap; }
+  .label { font-size:11px; font-weight:600; color:var(--sub); text-transform:uppercase; letter-spacing:.04em; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- React + Babel (in-browser JSX, no build step needed) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Firebase (compat SDK — simplest, no bundler needed) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+
+<script>
+/* =========================================================================
+   1) PASTE YOUR FIREBASE CONFIG HERE (from Firebase console > project settings)
+   ========================================================================= */
+const firebaseConfig = {
+  apiKey: "AIzaSyCRCmnGUN0NTY68NPMRe9R5Sz-RB2KlpCA",
+  authDomain: "spica-stock.firebaseapp.com",
+  projectId: "spica-stock",
+  storageBucket: "spica-stock.firebasestorage.app",
+  messagingSenderId: "746960148449",
+  appId: "1:746960148449:web:0abdf851fb042401c564a0"
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+
+/* =========================================================================
+   2) MAP EACH USERNAME TO A ROLE
+   In Firebase console > Authentication > Users, create each user with the
+   email format  username@spica.internal  (e.g. admin@spica.internal).
+   People will just type "admin" (not the full email) on the login screen.
+   ========================================================================= */
+const USER_DOMAIN = "spica.internal";
+const ROLE_MAP = {
+  "admin": "admin",
+  "warehouse": "warehouse",
+  "sales": "sales"
+};
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo } = React;
+
+const FONT_DISPLAY = "'Fraunces', Georgia, serif";
+const FONT_MONO = "'IBM Plex Mono', monospace";
+const C = {
+  goldSoft:"#F1E4C2", tealSoft:"#E1EEEC", rustSoft:"#F6E2DA", greenSoft:"#E4EEE0",
+  gold:"#B8912E", tealDeep:"#0A2B2C", rust:"#B3492B", green:"#294A29", sub:"#6B6459", line:"#E4DFD3", teal:"#0F3D3E"
+};
+const uid = () => Math.random().toString(36).slice(2, 9);
+const CATEGORIES = ["Chair", "Table", "Sofa", "Other"];
+
+function makeSku(product, v) {
+  const p = (product?.code || "GEN").toUpperCase();
+  const c = (v.colorCode || "NA").toUpperCase();
+  const isChair = product?.category === "Chair";
+  const s = isChair ? (v.seatColor || "").toUpperCase() : "";
+  const h = isChair ? (v.headrest === "Yes" ? "HR" : "NH") : "";
+  const sz = (v.size || "STD").toUpperCase();
+  return [p, c, s, h, sz].filter(Boolean).join("-");
+}
+
+/* ---------- Firestore helpers (shared live data, one doc per collection) ---------- */
+const DOC = (name) => db.collection("spica_stock").doc(name);
+function useSyncedDoc(name, fallback) {
+  const [value, setValue] = useState(fallback);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const unsub = DOC(name).onSnapshot((snap) => {
+      setValue(snap.exists ? snap.data().payload : fallback);
+      setReady(true);
+    });
+    return unsub;
+  }, [name]);
+  const save = useCallback((next) => {
+    setValue(next);
+    DOC(name).set({ payload: next });
+  }, [name]);
+  return [value, save, ready];
+}
+
+/* ---------- small UI atoms ---------- */
+function Badge({ tone, children }) {
+  const tones = { gold:{bg:C.goldSoft,fg:"#6B5310"}, teal:{bg:C.tealSoft,fg:C.tealDeep}, rust:{bg:C.rustSoft,fg:"#7A2D18"}, green:{bg:C.greenSoft,fg:C.green} };
+  const t = tones[tone] || tones.teal;
+  return <span className="badge" style={{ background:t.bg, color:t.fg }}>{children}</span>;
+}
+function Field({ label, children }) {
+  return <label style={{ display:"flex", flexDirection:"column", gap:4 }}><span className="label">{label}</span>{children}</label>;
+}
+function Btn({ children, onClick, variant="ghost", disabled }) {
+  const variants = {
+    primary:{background:C.teal,color:"#fff",borderColor:C.teal},
+    gold:{background:C.gold,color:"#fff",borderColor:C.gold},
+    ghost:{background:"transparent",color:C.teal,borderColor:C.line},
+    danger:{background:"transparent",color:C.rust,borderColor:C.rustSoft},
+  };
+  return <button disabled={disabled} onClick={onClick} style={{...variants[variant], opacity: disabled?0.45:1, cursor: disabled?"not-allowed":"pointer"}}>{children}</button>;
+}
+function SectionHeader({ eyebrow, title, action }) {
+  return (
+    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end", marginBottom:18, flexWrap:"wrap", gap:10 }}>
+      <div>
+        <div style={{ fontSize:11, fontWeight:600, letterSpacing:"0.08em", textTransform:"uppercase", color:C.gold, marginBottom:4 }}>{eyebrow}</div>
+        <h2 style={{ fontFamily:FONT_DISPLAY, fontWeight:600, fontSize:24, margin:0, color:C.tealDeep }}>{title}</h2>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+/* ---------- Login screen ---------- */
+function Login() {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError(""); setBusy(true);
+    const fakeEmail = `${username.trim().toLowerCase()}@${USER_DOMAIN}`;
+    try {
+      await auth.signInWithEmailAndPassword(fakeEmail, password);
+    } catch (err) {
+      setError("Login failed. Check username and password.");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"#FAF7F0" }}>
+      <form onSubmit={submit} style={{ background:"#fff", border:`1px solid ${C.line}`, borderRadius:12, padding:"32px 36px", width:320 }}>
+        <div style={{ fontFamily:FONT_DISPLAY, fontWeight:600, fontSize:22, color:C.tealDeep, marginBottom:2 }}>Spica Modular</div>
+        <div style={{ fontSize:12, color:C.gold, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:24 }}>Stock control login</div>
+        <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          <Field label="Username">
+            <input value={username} onChange={(e)=>setUsername(e.target.value)} placeholder="admin" style={{width:"100%"}} />
+          </Field>
+          <Field label="Password">
+            <input type="password" value={password} onChange={(e)=>setPassword(e.target.value)} style={{width:"100%"}} />
+          </Field>
+          {error && <div style={{ color:C.rust, fontSize:12 }}>{error}</div>}
+          <Btn variant="primary" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</Btn>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ---------- Main App ---------- */
+function App({ user, role }) {
+  const [tab, setTab] = useState("dashboard");
+  const [products, setProducts, productsReady] = useSyncedDoc("products", []);
+  const [variants, setVariants, variantsReady] = useSyncedDoc("variants", []);
+  const [stock, setStock, stockReady] = useSyncedDoc("stock", {});
+  const [orders, setOrders, ordersReady] = useSyncedDoc("orders", []);
+  const ready = productsReady && variantsReady && stockReady && ordersReady;
+
+  const perms = {
+    isAdmin: role === "admin",
+    canEditCatalogue: role === "admin",              // add/delete products
+    canEditVariants: role === "admin" || role === "warehouse",
+    canEditStock: role === "admin" || role === "warehouse",
+    canManageOrders: role === "admin" || role === "warehouse",
+    canDelete: role === "admin",                       // warehouse can add/edit but not delete
+    readOnly: role === "sales",
+  };
+
+  const productMap = useMemo(() => Object.fromEntries(products.map(p => [p.id, p])), [products]);
+  const variantMap = useMemo(() => Object.fromEntries(variants.map(v => [v.id, v])), [variants]);
+  const getStock = useCallback((id) => stock[id] || {opening:0,in:0,out:0,blocked:0}, [stock]);
+  const available = useCallback((id) => { const s = getStock(id); return (s.opening||0)+(s.in||0)-(s.out||0)-(s.blocked||0); }, [getStock]);
+  const setStockField = (id, field, value) => {
+    if (!perms.canEditStock) return;
+    setStock({ ...stock, [id]: { ...(stock[id]||{opening:0,in:0,out:0,blocked:0}), [field]: Number(value)||0 } });
+  };
+
+  if (!ready) return <div style={{padding:40}}>Loading…</div>;
+
+  const totalAvailable = variants.reduce((s,v)=>s+available(v.id),0);
+  const totalBlocked = variants.reduce((s,v)=>s+(getStock(v.id).blocked||0),0);
+  const lowStock = variants.filter(v => available(v.id) <= 5 && available(v.id) >= 0);
+  const negativeStock = variants.filter(v => available(v.id) < 0);
+
+  const tabs = [
+    { id:"dashboard", label:"Dashboard", icon:"ti-layout-dashboard" },
+    { id:"products", label:"Products", icon:"ti-armchair" },
+    { id:"variants", label:"Variants", icon:"ti-palette" },
+    { id:"stock", label:"Stock ledger", icon:"ti-clipboard-list" },
+    { id:"orders", label:"Orders & blocking", icon:"ti-lock" },
+  ];
+
+  const roleLabel = { admin:"Admin", warehouse:"Warehouse manager", sales:"Sales (view only)" }[role] || role;
+
+  return (
+    <div style={{ minHeight:"100vh" }}>
+      <div style={{ display:"flex", minHeight:"100vh" }}>
+        <div style={{ width:220, background:C.teal, padding:"24px 14px", display:"flex", flexDirection:"column", gap:4, flexShrink:0 }}>
+          <div style={{ padding:"0 10px 22px" }}>
+            <div style={{ fontFamily:FONT_DISPLAY, fontWeight:600, fontSize:19, color:"#fff", lineHeight:1.1 }}>Spica Modular</div>
+            <div style={{ fontSize:11, color:C.gold, letterSpacing:"0.06em", textTransform:"uppercase", marginTop:2 }}>Stock control</div>
+          </div>
+          {tabs.map(t => (
+            <button key={t.id} onClick={()=>setTab(t.id)} style={{
+              display:"flex", alignItems:"center", gap:10, padding:"10px 12px", borderRadius:6, border:"none",
+              textAlign:"left", fontWeight:500, background: tab===t.id ? "rgba(184,145,46,0.18)" : "transparent",
+              color: tab===t.id ? C.gold : "rgba(255,255,255,0.78)"
+            }}>
+              <i className={`ti ${t.icon}`} style={{ fontSize:17 }} aria-hidden="true"></i>{t.label}
+            </button>
+          ))}
+          <div style={{ marginTop:"auto", paddingTop:20, borderTop:"1px solid rgba(255,255,255,0.15)" }}>
+            <div style={{ fontSize:12, color:"#fff", fontWeight:500 }}>{user.email}</div>
+            <div style={{ fontSize:11, color:C.gold, marginBottom:10 }}>{roleLabel}</div>
+            <button onClick={()=>auth.signOut()} style={{ width:"100%", background:"transparent", border:"1px solid rgba(255,255,255,0.3)", color:"#fff" }}>Sign out</button>
+          </div>
+        </div>
+
+        <div style={{ flex:1, padding:"28px 32px", minWidth:0 }}>
+          {tab==="dashboard" && <Dashboard products={products} variants={variants} orders={orders} totalAvailable={totalAvailable} totalBlocked={totalBlocked} lowStock={lowStock} negativeStock={negativeStock} productMap={productMap} />}
+          {tab==="products" && <Products products={products} setProducts={setProducts} variants={variants} perms={perms} />}
+          {tab==="variants" && <Variants products={products} variants={variants} setVariants={setVariants} stock={stock} setStock={setStock} perms={perms} />}
+          {tab==="stock" && <StockLedger products={products} variants={variants} productMap={productMap} getStock={getStock} available={available} setStockField={setStockField} perms={perms} />}
+          {tab==="orders" && <Orders variants={variants} variantMap={variantMap} orders={orders} setOrders={setOrders} stock={stock} setStock={setStock} available={available} perms={perms} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, tone }) {
+  const toneColor = {teal:C.tealDeep,gold:"#6B5310",rust:"#7A2D18",green:C.green}[tone]||C.tealDeep;
+  const toneBg = {teal:C.tealSoft,gold:C.goldSoft,rust:C.rustSoft,green:C.greenSoft}[tone]||C.tealSoft;
+  return (
+    <div style={{ background:toneBg, borderRadius:10, padding:"16px 18px", flex:1, minWidth:140 }}>
+      <div style={{ fontSize:12, fontWeight:600, color:toneColor, opacity:.75, textTransform:"uppercase" }}>{label}</div>
+      <div style={{ fontFamily:FONT_DISPLAY, fontSize:30, fontWeight:600, color:toneColor, marginTop:4 }}>{value}</div>
+    </div>
+  );
+}
+
+function Dashboard({ products, variants, orders, totalAvailable, totalBlocked, lowStock, negativeStock, productMap }) {
+  return (
+    <div>
+      <SectionHeader eyebrow="Overview" title="Today's stock position" />
+      <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginBottom:28 }}>
+        <StatCard label="Products" value={products.length} tone="teal" />
+        <StatCard label="Variants (SKUs)" value={variants.length} tone="teal" />
+        <StatCard label="Available units" value={totalAvailable} tone="green" />
+        <StatCard label="Blocked units" value={totalBlocked} tone="gold" />
+        <StatCard label="Open orders" value={orders.filter(o=>o.status!=="CONFIRMED"&&o.status!=="CANCELLED").length} tone="rust" />
+      </div>
+      <div style={{ display:"flex", gap:24, flexWrap:"wrap" }}>
+        <div style={{ flex:1, minWidth:300 }} className="card">
+          <div style={{ padding:18 }}>
+            <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep, marginBottom:10 }}>Low stock (5 or fewer)</div>
+            {lowStock.length===0 && <div style={{ fontSize:13, color:C.sub }}>Nothing running low right now.</div>}
+            {lowStock.slice(0,8).map(v => (
+              <div key={v.id} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
+                <span>{productMap[v.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v.sku}</span></span>
+                <Badge tone="rust">Low</Badge>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={{ flex:1, minWidth:300 }} className="card">
+          <div style={{ padding:18 }}>
+            <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep, marginBottom:10 }}>Needs attention</div>
+            {negativeStock.length===0 && <div style={{ fontSize:13, color:C.sub }}>No stock is over-committed.</div>}
+            {negativeStock.map(v => (
+              <div key={v.id} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
+                <span>{productMap[v.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v.sku}</span></span>
+                <Badge tone="rust">Over-blocked</Badge>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Products({ products, setProducts, variants, perms }) {
+  const [name, setName] = useState(""); const [code, setCode] = useState(""); const [category, setCategory] = useState("Chair");
+  const add = () => {
+    if (!perms.canEditCatalogue || !name.trim() || !code.trim()) return;
+    setProducts([...products, { id:uid(), name:name.trim(), code:code.trim().toUpperCase(), category }]);
+    setName(""); setCode("");
+  };
+  const remove = (id) => { if (!perms.canDelete) return; setProducts(products.filter(x=>x.id!==id)); };
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Catalogue" title="Products" />
+      {perms.canEditCatalogue && (
+        <div style={{ display:"flex", gap:10, marginBottom:20, alignItems:"flex-end", flexWrap:"wrap" }}>
+          <Field label="Product name"><input style={{width:220}} value={name} onChange={e=>setName(e.target.value)} placeholder="Sofa 3-seater" /></Field>
+          <Field label="Product code"><input style={{width:140}} value={code} onChange={e=>setCode(e.target.value)} placeholder="SFA" /></Field>
+          <Field label="Category">
+            <select style={{width:130}} value={category} onChange={e=>setCategory(e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select>
+          </Field>
+          <Btn variant="primary" onClick={add}><i className="ti ti-plus" style={{verticalAlign:-2,marginRight:4}}></i>Add product</Btn>
+        </div>
+      )}
+      {!perms.canEditCatalogue && !perms.readOnly && (
+        <div style={{ fontSize:12, color:C.sub, marginBottom:14 }}>Only admin can add or remove products. You can still view the catalogue.</div>
+      )}
+      <div className="card">
+        <table>
+          <thead><tr style={{background:C.tealSoft}}><th>Product</th><th>Code</th><th>Category</th><th>Variants</th><th></th></tr></thead>
+          <tbody>
+            {products.length===0 && <tr><td colSpan={5} style={{padding:18,color:C.sub,textAlign:"center"}}>No products yet.</td></tr>}
+            {products.map(p => (
+              <tr key={p.id} style={{borderTop:`1px solid ${C.line}`}}>
+                <td>{p.name}</td><td style={{fontFamily:FONT_MONO}}>{p.code}</td>
+                <td><Badge tone="teal">{p.category||"Other"}</Badge></td>
+                <td>{variants.filter(v=>v.productId===p.id).length}</td>
+                <td style={{textAlign:"right"}}>
+                  {perms.canDelete && <Btn variant="danger" onClick={()=>remove(p.id)}><i className="ti ti-trash" style={{verticalAlign:-2}}></i></Btn>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function Variants({ products, variants, setVariants, stock, setStock, perms }) {
+  const [productId, setProductId] = useState(""); const [colorCode, setColorCode] = useState("");
+  const [seatColor, setSeatColor] = useState(""); const [headrest, setHeadrest] = useState("No");
+  const [size, setSize] = useState(""); const [opening, setOpening] = useState(0);
+  const selectedProduct = products.find(p=>p.id===productId);
+  const isChair = selectedProduct?.category === "Chair";
+
+  const add = () => {
+    if (!perms.canEditVariants || !productId || !colorCode.trim()) return;
+    const v = { id:uid(), productId, colorCode:colorCode.trim(), seatColor: isChair?seatColor.trim():"", headrest: isChair?headrest:"No", size:size.trim() };
+    v.sku = makeSku(selectedProduct, v);
+    setVariants([...variants, v]);
+    setStock({ ...stock, [v.id]: { opening:Number(opening)||0, in:0, out:0, blocked:0 } });
+    setColorCode(""); setSeatColor(""); setHeadrest("No"); setSize(""); setOpening(0);
+  };
+  const remove = (id) => { if (!perms.canDelete) return; setVariants(variants.filter(v=>v.id!==id)); };
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Catalogue" title="Variants" />
+      {products.length===0 ? <div style={{color:C.sub,fontSize:13}}>Add a product first.</div> : (
+        <>
+          {perms.canEditVariants && (
+            <div style={{ display:"flex", gap:10, marginBottom:20, alignItems:"flex-end", flexWrap:"wrap" }}>
+              <Field label="Product">
+                <select style={{width:170}} value={productId} onChange={e=>setProductId(e.target.value)}>
+                  <option value="">Select</option>{products.map(p=><option key={p.id} value={p.id}>{p.name} ({p.category||"Other"})</option>)}
+                </select>
+              </Field>
+              <Field label="Color code"><input style={{width:140}} value={colorCode} onChange={e=>setColorCode(e.target.value)} placeholder="XP-01-FP9817" /></Field>
+              {isChair && <>
+                <Field label="Seat color"><input style={{width:110}} value={seatColor} onChange={e=>setSeatColor(e.target.value)} placeholder="Black" /></Field>
+                <Field label="Headrest"><select style={{width:90}} value={headrest} onChange={e=>setHeadrest(e.target.value)}><option>No</option><option>Yes</option></select></Field>
+              </>}
+              <Field label="Size"><input style={{width:90}} value={size} onChange={e=>setSize(e.target.value)} placeholder="6x3 ft" /></Field>
+              <Field label="Opening stock"><input type="number" style={{width:100}} value={opening} onChange={e=>setOpening(e.target.value)} /></Field>
+              <Btn variant="primary" onClick={add}><i className="ti ti-plus" style={{verticalAlign:-2,marginRight:4}}></i>Add variant</Btn>
+            </div>
+          )}
+          <div className="card">
+            <table>
+              <thead><tr style={{background:C.tealSoft}}><th>SKU</th><th>Product</th><th>Category</th><th>Color</th><th>Seat</th><th>Headrest</th><th>Size</th><th></th></tr></thead>
+              <tbody>
+                {variants.length===0 && <tr><td colSpan={8} style={{padding:18,color:C.sub,textAlign:"center"}}>No variants yet.</td></tr>}
+                {variants.map(v => {
+                  const p = products.find(x=>x.id===v.productId); const chair = p?.category==="Chair";
+                  return (
+                    <tr key={v.id} style={{borderTop:`1px solid ${C.line}`}}>
+                      <td style={{fontFamily:FONT_MONO,fontSize:12}}>{v.sku}</td>
+                      <td>{p?.name||"—"}</td>
+                      <td><Badge tone="teal">{p?.category||"Other"}</Badge></td>
+                      <td>{v.colorCode}</td>
+                      <td>{chair?(v.seatColor||"—"):"—"}</td>
+                      <td>{chair?(v.headrest==="Yes"?<Badge tone="gold">Yes</Badge>:"No"):"—"}</td>
+                      <td>{v.size||"—"}</td>
+                      <td style={{textAlign:"right"}}>{perms.canDelete && <Btn variant="danger" onClick={()=>remove(v.id)}><i className="ti ti-trash" style={{verticalAlign:-2}}></i></Btn>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StockLedger({ products, variants, productMap, getStock, available, setStockField, perms }) {
+  const [filterProduct, setFilterProduct] = useState("");
+  const list = variants.filter(v => !filterProduct || v.productId===filterProduct);
+  return (
+    <div>
+      <SectionHeader eyebrow="Ledger" title="Stock ledger" action={
+        <Field label="Filter by product">
+          <select style={{width:180}} value={filterProduct} onChange={e=>setFilterProduct(e.target.value)}>
+            <option value="">All products</option>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+      } />
+      <div className="card">
+        <table>
+          <thead><tr style={{background:C.tealSoft}}><th>SKU</th><th>Product</th><th style={{textAlign:"right"}}>Opening</th><th style={{textAlign:"right"}}>In</th><th style={{textAlign:"right"}}>Out</th><th style={{textAlign:"right"}}>Blocked</th><th style={{textAlign:"right"}}>Available</th></tr></thead>
+          <tbody>
+            {list.length===0 && <tr><td colSpan={7} style={{padding:18,color:C.sub,textAlign:"center"}}>No stock rows.</td></tr>}
+            {list.map(v => {
+              const s = getStock(v.id); const avail = available(v.id); const hasBlock = (s.blocked||0) > 0;
+              return (
+                <tr key={v.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: hasBlock?`3px dashed ${C.gold}`:"3px solid transparent"}}>
+                  <td style={{fontFamily:FONT_MONO,fontSize:12}}>{v.sku}</td>
+                  <td>{productMap[v.productId]?.name||"—"}</td>
+                  <td style={{textAlign:"right"}}><input type="number" disabled={!perms.canEditStock} value={s.opening} onChange={e=>setStockField(v.id,"opening",e.target.value)} style={{width:64,textAlign:"right",padding:"5px 6px"}} /></td>
+                  <td style={{textAlign:"right"}}><input type="number" disabled={!perms.canEditStock} value={s.in} onChange={e=>setStockField(v.id,"in",e.target.value)} style={{width:64,textAlign:"right",padding:"5px 6px"}} /></td>
+                  <td style={{textAlign:"right"}}><input type="number" disabled={!perms.canEditStock} value={s.out} onChange={e=>setStockField(v.id,"out",e.target.value)} style={{width:64,textAlign:"right",padding:"5px 6px"}} /></td>
+                  <td style={{textAlign:"right",fontFamily:FONT_MONO,color:hasBlock?"#6B5310":C.sub}}>{s.blocked||0}</td>
+                  <td style={{textAlign:"right",fontFamily:FONT_MONO,fontWeight:600,color: avail<0?C.rust:C.tealDeep}}>{avail}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{fontSize:12,color:C.sub,marginTop:10}}>Available = opening + in − out − blocked.</div>
+    </div>
+  );
+}
+
+function Orders({ variants, variantMap, orders, setOrders, stock, setStock, available, perms }) {
+  const [customer, setCustomer] = useState(""); const [variantId, setVariantId] = useState("");
+  const [qty, setQty] = useState(1); const [error, setError] = useState("");
+
+  const createOrder = () => {
+    setError("");
+    if (!perms.canManageOrders || !customer.trim() || !variantId || !qty) return;
+    const q = Number(qty); if (q<=0) return;
+    if (available(variantId) < q) { setError("Not enough available stock to block that quantity."); return; }
+    const order = { id:uid(), customer:customer.trim(), date:new Date().toISOString().slice(0,10), status:"BLOCKED", items:[{variantId,qty:q}] };
+    setOrders([order, ...orders]);
+    setStock({ ...stock, [variantId]: { ...(stock[variantId]||{opening:0,in:0,out:0,blocked:0}), blocked:(stock[variantId]?.blocked||0)+q } });
+    setCustomer(""); setVariantId(""); setQty(1);
+  };
+  const releaseOrder = (order) => {
+    if (!perms.canManageOrders) return;
+    setOrders(orders.map(o=>o.id===order.id?{...o,status:"RELEASED"}:o));
+    const next = {...stock};
+    order.items.forEach(it => { next[it.variantId] = {...(next[it.variantId]||{opening:0,in:0,out:0,blocked:0})}; next[it.variantId].blocked = Math.max(0,(next[it.variantId].blocked||0)-it.qty); });
+    setStock(next);
+  };
+  const confirmOrder = (order) => {
+    if (!perms.canManageOrders) return;
+    setOrders(orders.map(o=>o.id===order.id?{...o,status:"CONFIRMED"}:o));
+    const next = {...stock};
+    order.items.forEach(it => { const cur = next[it.variantId]||{opening:0,in:0,out:0,blocked:0}; next[it.variantId] = {...cur, blocked:Math.max(0,(cur.blocked||0)-it.qty), out:(cur.out||0)+it.qty}; });
+    setStock(next);
+  };
+  const toneFor = (s) => s==="BLOCKED"?"gold":s==="CONFIRMED"?"green":s==="RELEASED"?"teal":"rust";
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Fulfilment" title="Orders & stock blocking" />
+      {perms.canManageOrders && (
+        <div style={{ display:"flex", gap:10, marginBottom:10, alignItems:"flex-end", flexWrap:"wrap" }}>
+          <Field label="Customer"><input style={{width:180}} value={customer} onChange={e=>setCustomer(e.target.value)} placeholder="Customer name" /></Field>
+          <Field label="Variant (SKU)">
+            <select style={{width:240}} value={variantId} onChange={e=>setVariantId(e.target.value)}>
+              <option value="">Select</option>{variants.map(v=><option key={v.id} value={v.id}>{v.sku} — {available(v.id)} avail.</option>)}
+            </select>
+          </Field>
+          <Field label="Quantity"><input type="number" min="1" style={{width:90}} value={qty} onChange={e=>setQty(e.target.value)} /></Field>
+          <Btn variant="gold" onClick={createOrder}><i className="ti ti-lock" style={{verticalAlign:-2,marginRight:4}}></i>Block stock for order</Btn>
+        </div>
+      )}
+      {error && <div style={{color:C.rust,fontSize:12,marginBottom:14}}>{error}</div>}
+      <div className="card" style={{marginTop:14}}>
+        <table>
+          <thead><tr style={{background:C.tealSoft}}><th>Customer</th><th>SKU</th><th style={{textAlign:"right"}}>Qty</th><th>Date</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {orders.length===0 && <tr><td colSpan={6} style={{padding:18,color:C.sub,textAlign:"center"}}>No orders yet.</td></tr>}
+            {orders.map(o => (
+              <tr key={o.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: o.status==="BLOCKED"?`3px dashed ${C.gold}`:"3px solid transparent"}}>
+                <td>{o.customer}</td>
+                <td style={{fontFamily:FONT_MONO,fontSize:12}}>{variantMap[o.items[0].variantId]?.sku||"—"}</td>
+                <td style={{textAlign:"right"}}>{o.items[0].qty}</td>
+                <td>{o.date}</td>
+                <td><Badge tone={toneFor(o.status)}>{o.status}</Badge></td>
+                <td style={{textAlign:"right",display:"flex",gap:6,justifyContent:"flex-end"}}>
+                  {o.status==="BLOCKED" && perms.canManageOrders && <>
+                    <Btn variant="primary" onClick={()=>confirmOrder(o)}>Confirm sale</Btn>
+                    <Btn variant="danger" onClick={()=>releaseOrder(o)}>Release</Btn>
+                  </>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Root: auth gate ---------- */
+function Root() {
+  const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
+  useEffect(() => auth.onAuthStateChanged(setUser), []);
+
+  if (user === undefined) return <div style={{padding:40}}>Loading…</div>;
+  if (user === null) return <Login />;
+
+  const username = (user.email || "").split("@")[0];
+  const role = ROLE_MAP[username] || null;
+  if (!role) {
+    return (
+      <div style={{ padding:40 }}>
+        <p>Your account ({username}) isn't assigned a role yet. Ask the admin to add your username to ROLE_MAP in the code.</p>
+        <Btn onClick={()=>auth.signOut()}>Sign out</Btn>
+      </div>
+    );
+  }
+  return <App user={{ email: username }} role={role} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+</script>
+</body>
+</html>

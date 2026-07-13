@@ -23,9 +23,39 @@
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th { padding:10px 14px; font-weight:600; color:var(--tealDeep); text-align:left; }
   td { padding:10px 14px; }
-  .card { background:var(--surface); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden; box-shadow:0 1px 2px rgba(10,43,44,0.04), 0 8px 24px -12px rgba(10,43,44,0.10); transition:box-shadow .2s ease; }
+  .stat-card { position:relative; border-radius:12px; overflow:hidden; box-shadow:0 1px 2px rgba(10,43,44,0.04), 0 6px 18px -10px rgba(10,43,44,0.12); transition:transform .15s ease, box-shadow .15s ease; }
+  .stat-card:hover { transform:translateY(-2px); box-shadow:0 4px 10px rgba(10,43,44,0.06), 0 14px 28px -12px rgba(10,43,44,0.16); }
   .badge { font-size:11px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; padding:3px 8px; border-radius:4px; white-space:nowrap; }
   .label { font-size:11px; font-weight:600; color:var(--sub); text-transform:uppercase; letter-spacing:.04em; }
+
+  .app-shell { display:flex; min-height:100vh; }
+  .sidebar { width:220px; background:var(--teal); padding:24px 14px; display:flex; flex-direction:column; gap:4px; flex-shrink:0; }
+  .main-content { flex:1; padding:28px 32px; min-width:0; max-width:100%; }
+  .mobile-topbar { display:none; }
+  .nav-overlay { display:none; }
+  .card:has(table) { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .card table { min-width:640px; }
+
+  @media (max-width: 860px) {
+    .mobile-topbar {
+      display:flex; align-items:center; justify-content:space-between;
+      background:var(--teal); padding:12px 16px; position:sticky; top:0; z-index:60;
+    }
+    .app-shell { flex-direction:column; }
+    .sidebar { display:none; }
+    .sidebar.mobile-open {
+      display:flex; position:fixed; top:0; left:0; bottom:0; width:78vw; max-width:280px;
+      z-index:80; overflow-y:auto; box-shadow:4px 0 24px rgba(0,0,0,0.25);
+    }
+    .nav-overlay.mobile-open {
+      display:block; position:fixed; inset:0; background:rgba(10,43,44,0.45); z-index:70;
+    }
+    .main-content { padding:16px; }
+    table { font-size:12px; }
+    th, td { padding:8px 10px; }
+    .sidebar-close-btn { display:flex !important; }
+  }
 </style>
 </head>
 <body>
@@ -81,7 +111,7 @@ const SEED_ROLE_MAP = {
 
 <script type="text/babel">
 
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 const FONT_DISPLAY = "'Fraunces', Georgia, serif";
 const FONT_MONO = "'IBM Plex Mono', monospace";
@@ -114,6 +144,18 @@ function makeSku(product, v) {
   const h = isChair ? (v.headrest === "Yes" ? "HR" : "NH") : "";
   const sz = (v.size || "STD").toUpperCase();
   return [p, c, s, h, sz].filter(Boolean).join("-");
+}
+
+// Short, easy-to-read identifier: PRODUCTCODE-01, PRODUCTCODE-02, ...
+// Numbered per product, so it stays short even though the full SKU (with
+// color/seat/headrest/size) can get long. The full SKU is still kept as the
+// detailed reference alongside it.
+function makeShortCode(product, existingVariants) {
+  const p = (product?.code || "GEN").toUpperCase();
+  const countForProduct = existingVariants.filter(v => v.productId === product?.id).length;
+  const n = countForProduct + 1;
+  const padded = n < 100 ? String(n).padStart(2, "0") : String(n);
+  return `${p}-${padded}`;
 }
 
 /* ---------- Firestore helpers (shared live data, one doc per collection) ---------- */
@@ -169,14 +211,14 @@ function Badge({ tone, children }) {
 function Field({ label, children }) {
   return <label style={{ display:"flex", flexDirection:"column", gap:4 }}><span className="label">{label}</span>{children}</label>;
 }
-function Btn({ children, onClick, variant="ghost", disabled }) {
+function Btn({ children, onClick, variant="ghost", disabled, style }) {
   const variants = {
     primary:{background:C.teal,color:"#fff",borderColor:C.teal},
     gold:{background:C.gold,color:"#fff",borderColor:C.gold},
     ghost:{background:"transparent",color:C.teal,borderColor:C.line},
-    danger:{background:"transparent",color:C.rust,borderColor:C.rustSoft},
+    danger:{background:"#8B1E12",color:"#fff",borderColor:"#8B1E12"},
   };
-  return <button disabled={disabled} onClick={onClick} style={{...variants[variant], opacity: disabled?0.45:1, cursor: disabled?"not-allowed":"pointer"}}>{children}</button>;
+  return <button disabled={disabled} onClick={onClick} style={{...variants[variant], opacity: disabled?0.45:1, cursor: disabled?"not-allowed":"pointer", ...style}}>{children}</button>;
 }
 function SectionHeader({ eyebrow, title, action }) {
   return (
@@ -194,6 +236,126 @@ function SearchBox({ value, onChange, placeholder }) {
     <div style={{ position:"relative", width:220 }}>
       <i className="ti ti-search" style={{ position:"absolute", left:10, top:9, fontSize:15, color:C.sub }} aria-hidden="true"></i>
       <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder||"Search…"} style={{ width:"100%", paddingLeft:32 }} />
+    </div>
+  );
+}
+
+// Type-to-search variant picker: type a code/color/product and pick from the
+// filtered suggestion list, instead of scrolling a long <select>.
+function VariantAutocomplete({ options, productMap, value, onChange, placeholder, width }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const selected = options.find(v => v.id === value);
+
+  useEffect(() => {
+    if (selected) setQuery(`${selected.shortCode||"Unnamed variant"}${selected.colorCode?` — ${selected.colorCode}`:""}`);
+    else if (!value) setQuery("");
+  }, [value]);
+
+  const matches = useMemo(() => {
+    const s = query.trim().toLowerCase();
+    if (!s) return options.slice(0, 8);
+    return options.filter(v => {
+      const p = productMap[v.productId];
+      return (v.shortCode||"").toLowerCase().includes(s) || (v.colorCode||"").toLowerCase().includes(s) || (p?.name||"").toLowerCase().includes(s);
+    }).slice(0, 8);
+  }, [query, options, productMap]);
+
+  const pick = (v) => {
+    onChange(v.id);
+    setQuery(`${v.shortCode||"Unnamed variant"}${v.colorCode?` — ${v.colorCode}`:""}`);
+    setOpen(false);
+  };
+
+  return (
+    <div style={{ position:"relative", width: width||200 }}>
+      <input
+        value={query}
+        placeholder={placeholder||"Type to search…"}
+        onChange={e=>{ setQuery(e.target.value); setOpen(true); if (value) onChange(""); }}
+        onFocus={()=>setOpen(true)}
+        onBlur={()=>setTimeout(()=>setOpen(false), 150)}
+        style={{ width:"100%" }}
+      />
+      {open && matches.length>0 && (
+        <div style={{
+          position:"absolute", top:"100%", left:0, right:0, marginTop:4, background:"#fff",
+          border:`1px solid ${C.line}`, borderRadius:8, boxShadow:"0 8px 24px -8px rgba(10,43,44,0.25)",
+          zIndex:100, maxHeight:220, overflowY:"auto"
+        }}>
+          {matches.map(v => {
+            const p = productMap[v.productId];
+            return (
+              <div key={v.id} onMouseDown={()=>pick(v)} style={{ padding:"8px 12px", cursor:"pointer", borderBottom:`1px solid ${C.line}` }}>
+                <div style={{ fontSize:13, fontWeight:600, color:C.tealDeep }}>{v.shortCode||"Unnamed variant"}</div>
+                <div style={{ fontSize:11, color:C.sub }}>{p?.name||"—"}{v.colorCode?` · ${v.colorCode}`:""}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {open && matches.length===0 && (
+        <div style={{
+          position:"absolute", top:"100%", left:0, right:0, marginTop:4, background:"#fff",
+          border:`1px solid ${C.line}`, borderRadius:8, boxShadow:"0 8px 24px -8px rgba(10,43,44,0.25)",
+          zIndex:100, padding:"8px 12px", fontSize:12, color:C.sub
+        }}>No matches.</div>
+      )}
+    </div>
+  );
+}
+
+// Type-to-search product picker, same idea as VariantAutocomplete but for products.
+function ProductAutocomplete({ products, value, onChange, placeholder, width, allowAll }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const selected = products.find(p => p.id === value);
+
+  useEffect(() => {
+    if (selected) setQuery(selected.name);
+    else if (!value) setQuery("");
+  }, [value]);
+
+  const matches = useMemo(() => {
+    const s = query.trim().toLowerCase();
+    const base = !s ? products : products.filter(p => p.name.toLowerCase().includes(s) || (p.code||"").toLowerCase().includes(s));
+    return base.slice(0, 8);
+  }, [query, products]);
+
+  const pick = (p) => {
+    onChange(p ? p.id : "");
+    setQuery(p ? p.name : "");
+    setOpen(false);
+  };
+
+  return (
+    <div style={{ position:"relative", width: width||180 }}>
+      <input
+        value={query}
+        placeholder={placeholder||"Type a product…"}
+        onChange={e=>{ setQuery(e.target.value); setOpen(true); if (value) onChange(""); }}
+        onFocus={()=>setOpen(true)}
+        onBlur={()=>setTimeout(()=>setOpen(false), 150)}
+        style={{ width:"100%" }}
+      />
+      {open && (
+        <div style={{
+          position:"absolute", top:"100%", left:0, right:0, marginTop:4, background:"#fff",
+          border:`1px solid ${C.line}`, borderRadius:8, boxShadow:"0 8px 24px -8px rgba(10,43,44,0.25)",
+          zIndex:100, maxHeight:220, overflowY:"auto"
+        }}>
+          {allowAll && (
+            <div onMouseDown={()=>pick(null)} style={{ padding:"8px 12px", cursor:"pointer", borderBottom:`1px solid ${C.line}`, fontWeight:600, color:C.tealDeep }}>All products</div>
+          )}
+          {matches.length===0 && <div style={{ padding:"8px 12px", fontSize:12, color:C.sub }}>No matches.</div>}
+          {matches.map(p => (
+            <div key={p.id} onMouseDown={()=>pick(p)} style={{ padding:"8px 12px", cursor:"pointer", borderBottom:`1px solid ${C.line}` }}>
+              <div style={{ fontSize:13, fontWeight:600, color:C.tealDeep }}>{p.name}</div>
+              <div style={{ fontSize:11, color:C.sub }}>{p.code}{p.category?` · ${p.category}`:""}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -240,13 +402,15 @@ function Login() {
 /* ---------- Main App ---------- */
 function App({ username, role }) {
   const [tab, setTab] = useState("dashboard");
+  const [navOpen, setNavOpen] = useState(false);
   const [products, setProducts, productsReady] = useSyncedDoc("products", []);
   const [variants, setVariants, variantsReady] = useSyncedDoc("variants", []);
   const [stock, setStock, stockReady] = useSyncedDoc("stock", {});
   const [orders, setOrders, ordersReady] = useSyncedDoc("orders", []);
   const [movements, setMovements, movementsReady] = useSyncedDoc("movements", []);
+  const [samples, setSamples, samplesReady] = useSyncedDoc("samples", []);
   const [users, usersReady] = useUsers();
-  const ready = productsReady && variantsReady && stockReady && ordersReady && movementsReady;
+  const ready = productsReady && variantsReady && stockReady && ordersReady && movementsReady && samplesReady;
 
   const perms = {
     isAdmin: role === "admin",
@@ -295,6 +459,7 @@ function App({ username, role }) {
     { id:"stock", label:"Stock ledger", icon:"ti-clipboard-list" },
     { id:"orders", label:"Orders & blocking", icon:"ti-lock" },
     { id:"reports", label:"Daily reports", icon:"ti-calendar-stats" },
+    { id:"mockup", label:"Mockup", icon:"ti-photo" },
   ];
   if (perms.canManageUsers) tabs.push({ id:"users", label:"Users", icon:"ti-users" });
 
@@ -302,14 +467,29 @@ function App({ username, role }) {
 
   return (
     <div style={{ minHeight:"100vh" }}>
-      <div style={{ display:"flex", minHeight:"100vh" }}>
-        <div style={{ width:220, background:C.teal, padding:"24px 14px", display:"flex", flexDirection:"column", gap:4, flexShrink:0 }}>
-          <div style={{ padding:"0 10px 22px" }}>
-            <div style={{ fontFamily:FONT_DISPLAY, fontWeight:600, fontSize:19, color:"#fff", lineHeight:1.1 }}>Spica Modular</div>
-            <div style={{ fontSize:11, color:C.gold, letterSpacing:"0.06em", textTransform:"uppercase", marginTop:2 }}>Stock control</div>
+      <div className="mobile-topbar">
+        <button onClick={()=>setNavOpen(true)} style={{ background:"transparent", border:"1px solid rgba(255,255,255,0.3)", color:"#fff", padding:"6px 10px" }}>
+          <i className="ti ti-menu-2" style={{ fontSize:18 }} aria-hidden="true"></i>
+        </button>
+        <div style={{ fontFamily:FONT_DISPLAY, fontWeight:600, fontSize:16, color:"#fff" }}>Spica Modular</div>
+        <div style={{ width:34 }} />
+      </div>
+
+      <div className={`nav-overlay ${navOpen?"mobile-open":""}`} onClick={()=>setNavOpen(false)} />
+
+      <div className="app-shell">
+        <div className={`sidebar ${navOpen?"mobile-open":""}`}>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 10px 22px" }}>
+            <div>
+              <div style={{ fontFamily:FONT_DISPLAY, fontWeight:600, fontSize:19, color:"#fff", lineHeight:1.1 }}>Spica Modular</div>
+              <div style={{ fontSize:11, color:C.gold, letterSpacing:"0.06em", textTransform:"uppercase", marginTop:2 }}>Stock control</div>
+            </div>
+            <button onClick={()=>setNavOpen(false)} className="sidebar-close-btn" style={{ display:"none", background:"transparent", border:"none", color:"#fff", padding:4 }}>
+              <i className="ti ti-x" style={{ fontSize:18 }} aria-hidden="true"></i>
+            </button>
           </div>
           {tabs.map(t => (
-            <button key={t.id} onClick={()=>setTab(t.id)} style={{
+            <button key={t.id} onClick={()=>{ setTab(t.id); setNavOpen(false); }} style={{
               display:"flex", alignItems:"center", gap:10, padding:"10px 12px", borderRadius:6, border:"none",
               textAlign:"left", fontWeight:500, background: tab===t.id ? "rgba(184,145,46,0.18)" : "transparent",
               color: tab===t.id ? C.gold : "rgba(255,255,255,0.78)"
@@ -324,13 +504,14 @@ function App({ username, role }) {
           </div>
         </div>
 
-        <div style={{ flex:1, padding:"28px 32px", minWidth:0 }}>
-          {tab==="dashboard" && <Dashboard products={products} variants={variants} orders={orders} movements={movements} available={available} totalAvailable={totalAvailable} totalBlocked={totalBlocked} lowStock={lowStock} negativeStock={negativeStock} productMap={productMap} />}
-          {tab==="products" && <Products products={products} setProducts={setProducts} variants={variants} perms={perms} />}
+        <div className="main-content">
+          {tab==="dashboard" && <Dashboard products={products} variants={variants} orders={orders} movements={movements} samples={samples} available={available} totalAvailable={totalAvailable} totalBlocked={totalBlocked} lowStock={lowStock} negativeStock={negativeStock} productMap={productMap} setTab={setTab} />}
+          {tab==="products" && <Products products={products} setProducts={setProducts} variants={variants} setVariants={setVariants} stock={stock} setStock={setStock} samples={samples} setSamples={setSamples} perms={perms} />}
           {tab==="variants" && <Variants products={products} variants={variants} setVariants={setVariants} stock={stock} setStock={setStock} perms={perms} />}
           {tab==="stock" && <StockLedger products={products} variants={variants} productMap={productMap} getStock={getStock} available={available} setOpening={setOpening} logMovement={logMovement} perms={perms} />}
-          {tab==="orders" && <Orders variants={variants} variantMap={variantMap} orders={orders} setOrders={setOrders} stock={stock} setStock={setStock} available={available} perms={perms} />}
+          {tab==="orders" && <Orders variants={variants} variantMap={variantMap} productMap={productMap} orders={orders} setOrders={setOrders} stock={stock} setStock={setStock} available={available} perms={perms} />}
           {tab==="reports" && <Reports movements={movements} variantMap={variantMap} productMap={productMap} products={products} />}
+          {tab==="mockup" && <Mockup products={products} variants={variants} variantMap={variantMap} productMap={productMap} samples={samples} setSamples={setSamples} perms={perms} setTab={setTab} />}
           {tab==="users" && perms.canManageUsers && <Users users={users} />}
         </div>
       </div>
@@ -338,48 +519,94 @@ function App({ username, role }) {
   );
 }
 
-function StatCard({ label, value, tone }) {
+function StatCard({ label, value, tone, icon }) {
   const toneColor = {teal:C.tealDeep,gold:"#6B5310",rust:"#7A2D18",green:C.green}[tone]||C.tealDeep;
   const toneBg = {teal:C.tealSoft,gold:C.goldSoft,rust:C.rustSoft,green:C.greenSoft}[tone]||C.tealSoft;
+  const toneAccent = {teal:C.teal,gold:C.gold,rust:C.rust,green:"#3F6B3F"}[tone]||C.teal;
   return (
-    <div style={{ background:toneBg, borderRadius:10, padding:"16px 18px", flex:1, minWidth:140 }}>
-      <div style={{ fontSize:12, fontWeight:600, color:toneColor, opacity:.75, textTransform:"uppercase" }}>{label}</div>
-      <div style={{ fontFamily:FONT_DISPLAY, fontSize:30, fontWeight:600, color:toneColor, marginTop:4 }}>{value}</div>
+    <div className="stat-card" style={{ background:"#fff", flex:1, minWidth:150 }}>
+      <div style={{ height:3, background:toneAccent }} />
+      <div style={{ padding:"16px 18px" }}>
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <div style={{ fontSize:11, fontWeight:600, color:C.sub, opacity:.85, textTransform:"uppercase", letterSpacing:"0.05em" }}>{label}</div>
+          {icon && (
+            <div style={{ width:26, height:26, borderRadius:7, background:toneBg, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+              <i className={`ti ${icon}`} style={{ fontSize:14, color:toneColor }} aria-hidden="true"></i>
+            </div>
+          )}
+        </div>
+        <div style={{ fontFamily:FONT_DISPLAY, fontSize:30, fontWeight:600, color:C.tealDeep, marginTop:6 }}>{value}</div>
+      </div>
     </div>
   );
 }
 
-function Dashboard({ products, variants, orders, movements, available, totalAvailable, totalBlocked, lowStock, negativeStock, productMap }) {
+function Dashboard({ products, variants, orders, movements, samples, available, totalAvailable, totalBlocked, lowStock, negativeStock, productMap, setTab }) {
   const [q, setQ] = useState("");
   const todayStr = today();
   const todayMoves = movements.filter(m => m.date === todayStr);
-  const todayIn = todayMoves.filter(m=>m.type==="in").reduce((s,m)=>s+m.qty,0);
-  const todayOut = todayMoves.filter(m=>m.type==="out").reduce((s,m)=>s+m.qty,0);
+  const todayInMoves = todayMoves.filter(m=>m.type==="in");
+  const todayOutMoves = todayMoves.filter(m=>m.type==="out");
+  const todayIn = todayInMoves.reduce((s,m)=>s+m.qty,0);
+  const todayOut = todayOutMoves.reduce((s,m)=>s+m.qty,0);
 
   const searchResults = q.trim() ? variants.filter(v => {
     const s = q.trim().toLowerCase();
-    return v.sku.toLowerCase().includes(s) || (productMap[v.productId]?.name||"").toLowerCase().includes(s) || (v.colorCode||"").toLowerCase().includes(s);
+    const p = productMap[v.productId];
+    return (v.shortCode||"").toLowerCase().includes(s) || (p?.name||"").toLowerCase().includes(s) || (v.colorCode||"").toLowerCase().includes(s) || (v.remark||"").toLowerCase().includes(s) || (p?.remark||"").toLowerCase().includes(s);
   }).slice(0, 8) : [];
+
+  const openOrders = orders.filter(o=>o.status!=="CONFIRMED"&&o.status!=="CANCELLED").length;
+  const dateLabel = new Date().toLocaleDateString("en-IN", { weekday:"long", day:"numeric", month:"long", year:"numeric" });
+  const samplesWithClient = samples.filter(sm=>sm.status==="with_client").length;
+  const samplesOverdue = samples.filter(sm=>sm.status==="with_client" && sm.expectedReturn && sm.expectedReturn < todayStr).length;
 
   return (
     <div>
-      <SectionHeader eyebrow="Overview" title="Today's stock position" />
+      <div style={{
+        borderRadius:14, padding:"22px 26px", marginBottom:22, position:"relative", overflow:"hidden",
+        background:`linear-gradient(135deg, ${C.tealDeep} 0%, ${C.teal} 100%)`,
+        boxShadow:"0 10px 30px -14px rgba(10,43,44,0.45)"
+      }}>
+        <div style={{ position:"absolute", top:-40, right:-40, width:160, height:160, borderRadius:"50%", background:"rgba(184,145,46,0.14)" }} />
+        <div style={{ position:"relative" }}>
+          <div style={{ fontSize:11, fontWeight:600, letterSpacing:"0.08em", textTransform:"uppercase", color:C.gold, marginBottom:6 }}>{dateLabel}</div>
+          <div style={{ fontFamily:FONT_DISPLAY, fontWeight:600, fontSize:26, color:"#fff" }}>Today's stock position</div>
+          <div style={{ fontSize:13, color:"rgba(255,255,255,0.72)", marginTop:6 }}>
+            {totalAvailable} units available across {variants.length} variants · {openOrders} open order{openOrders===1?"":"s"}
+          </div>
+        </div>
+      </div>
 
       <div className="card" style={{ padding:16, marginBottom:20 }}>
         <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>Quick stock check</div>
-        <SearchBox value={q} onChange={setQ} placeholder="Type a SKU, product, or color…" />
+        <SearchBox value={q} onChange={setQ} placeholder="Type a code, product, or color…" />
         {q.trim() && (
           <div style={{ marginTop:12 }}>
-            {searchResults.length===0 && <div style={{ fontSize:13, color:C.sub }}>No matching SKU found.</div>}
+            {searchResults.length===0 && <div style={{ fontSize:13, color:C.sub }}>No matching item found.</div>}
             {searchResults.map(v => {
               const avail = available(v.id);
+              const p = productMap[v.productId];
+              const remarkText = [v.remark, p?.remark].filter(Boolean).join(" · ");
+              const details = [
+                v.colorCode ? `Color: ${v.colorCode}` : null,
+                v.size ? `Size: ${v.size}` : null,
+                p?.category==="Chair" && v.seatColor ? `Seat: ${v.seatColor}` : null,
+                p?.category==="Chair" ? `Headrest: ${v.headrest==="Yes"?"Yes":"No"}` : null,
+              ].filter(Boolean).join(" · ");
               return (
-                <div key={v.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
-                  <span>
-                    <span style={{ fontFamily:FONT_MONO, fontSize:12 }}>{v.sku}</span>
-                    <span style={{ color:C.sub, marginLeft:8 }}>{productMap[v.productId]?.name||"—"}</span>
-                  </span>
-                  <span style={{ fontFamily:FONT_MONO, fontWeight:600, color: avail<0?C.rust:C.tealDeep }}>{avail} available</span>
+                <div key={v.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderBottom:`1px solid ${C.line}`, fontSize:13, gap:12 }}>
+                  <div>
+                    <div style={{ fontWeight:600, color:C.tealDeep }}>
+                      {p?.name||"—"} <span style={{ fontFamily:FONT_MONO, fontSize:11, fontWeight:600, color:C.sub, marginLeft:6 }}>{v.shortCode||"—"}</span>
+                    </div>
+                    {details && <div style={{ color:C.sub, fontSize:12, marginTop:2 }}>{details}</div>}
+                    {remarkText && <div style={{ color:C.rust, fontSize:12, marginTop:2, fontWeight:600 }}><i className="ti ti-alert-triangle" style={{verticalAlign:-2,marginRight:3}}></i>{remarkText}</div>}
+                  </div>
+                  <div style={{ textAlign:"right", flexShrink:0 }}>
+                    <div style={{ fontFamily:FONT_MONO, fontWeight:700, fontSize:16, color: avail<0?C.rust:C.tealDeep }}>{avail}</div>
+                    <div style={{ fontSize:11, color:C.sub }}>available</div>
+                  </div>
                 </div>
               );
             })}
@@ -387,39 +614,104 @@ function Dashboard({ products, variants, orders, movements, available, totalAvai
         )}
       </div>
 
-      <div style={{ display:"flex", gap:14, flexWrap:"wrap", marginBottom:28 }}>
-        <StatCard label="Products" value={products.length} tone="teal" />
-        <StatCard label="Variants (SKUs)" value={variants.length} tone="teal" />
-        <StatCard label="Available units" value={totalAvailable} tone="green" />
-        <StatCard label="Blocked units" value={totalBlocked} tone="gold" />
-        <StatCard label="Today's inward" value={todayIn} tone="green" />
-        <StatCard label="Today's outward" value={todayOut} tone="rust" />
-        <StatCard label="Open orders" value={orders.filter(o=>o.status!=="CONFIRMED"&&o.status!=="CANCELLED").length} tone="rust" />
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(150px, 1fr))", gap:14, marginBottom:28 }}>
+        <StatCard label="Products" value={products.length} tone="teal" icon="ti-armchair" />
+        <StatCard label="Variants" value={variants.length} tone="teal" icon="ti-palette" />
+        <StatCard label="Available units" value={totalAvailable} tone="green" icon="ti-package" />
+        <StatCard label="Blocked units" value={totalBlocked} tone="gold" icon="ti-lock" />
+        <StatCard label="Today's inward" value={todayIn} tone="green" icon="ti-arrow-down-left" />
+        <StatCard label="Today's outward" value={todayOut} tone="rust" icon="ti-arrow-up-right" />
+        <StatCard label="Open orders" value={openOrders} tone="rust" icon="ti-clipboard-list" />
       </div>
 
-      <div style={{ display:"flex", gap:24, flexWrap:"wrap" }}>
-        <div style={{ flex:1, minWidth:300 }} className="card">
+      <div className="card" style={{ padding:"18px 20px", marginBottom:24, display:"flex", alignItems:"center", justifyContent:"space-between", gap:16, flexWrap:"wrap", background:`linear-gradient(120deg, ${C.tealSoft} 0%, #fff 60%)` }}>
+        <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+          <div style={{ width:40, height:40, borderRadius:10, background:C.tealDeep, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+            <i className="ti ti-package-export" style={{ fontSize:20, color:C.gold }} aria-hidden="true"></i>
+          </div>
+          <div>
+            <div style={{ fontFamily:FONT_DISPLAY, fontSize:15, fontWeight:600, color:C.tealDeep }}>Mockup samples</div>
+            <div style={{ fontSize:12, color:C.sub, marginTop:2 }}>
+              {samplesWithClient} sample{samplesWithClient===1?"":"s"} currently with clients
+              {samplesOverdue>0 && <span style={{ color:C.rust, fontWeight:600 }}> · {samplesOverdue} overdue</span>}
+            </div>
+          </div>
+        </div>
+        <Btn variant="ghost" onClick={()=>setTab && setTab("mockup")}>Open Mockup<i className="ti ti-arrow-right" style={{verticalAlign:-2,marginLeft:6}}></i></Btn>
+      </div>
+
+      <div style={{ display:"flex", gap:24, flexWrap:"wrap", marginBottom:24 }}>
+        <div style={{ flex:1, minWidth:320 }} className="card">
           <div style={{ padding:18 }}>
-            <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep, marginBottom:10 }}>Today's movements</div>
-            {todayMoves.length===0 && <div style={{ fontSize:13, color:C.sub }}>No stock logged today yet.</div>}
-            {todayMoves.slice(0,8).map(m => {
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <div style={{ width:26, height:26, borderRadius:7, background:C.greenSoft, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                  <i className="ti ti-arrow-down-left" style={{ fontSize:14, color:C.green }} aria-hidden="true"></i>
+                </div>
+                <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep }}>Today's inward</div>
+              </div>
+              <Badge tone="green">Total +{todayIn}</Badge>
+            </div>
+            {todayInMoves.length===0 && <div style={{ fontSize:13, color:C.sub }}>No inward stock logged today.</div>}
+            {todayInMoves.map(m => {
               const v = variants.find(x=>x.id===m.variantId);
               return (
-                <div key={m.id} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
-                  <span>{productMap[v?.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v?.sku}</span></span>
-                  <span>{m.type==="in" ? <Badge tone="green">+{m.qty}</Badge> : <Badge tone="rust">-{m.qty}</Badge>}</span>
+                <div key={m.id} style={{ padding:"8px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between" }}>
+                    <span>{productMap[v?.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v?.shortCode||"—"}</span></span>
+                    <Badge tone="green">+{m.qty}</Badge>
+                  </div>
+                  <div style={{ color:C.sub, fontSize:12, marginTop:3 }}>
+                    {m.note ? `${m.note} · ` : ""}{m.loggedBy ? `logged by ${m.loggedBy}` : ""}
+                  </div>
                 </div>
               );
             })}
           </div>
         </div>
+        <div style={{ flex:1, minWidth:320 }} className="card">
+          <div style={{ padding:18 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <div style={{ width:26, height:26, borderRadius:7, background:C.rustSoft, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                  <i className="ti ti-arrow-up-right" style={{ fontSize:14, color:C.rust }} aria-hidden="true"></i>
+                </div>
+                <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep }}>Today's outward</div>
+              </div>
+              <Badge tone="rust">Total -{todayOut}</Badge>
+            </div>
+            {todayOutMoves.length===0 && <div style={{ fontSize:13, color:C.sub }}>No outward stock logged today.</div>}
+            {todayOutMoves.map(m => {
+              const v = variants.find(x=>x.id===m.variantId);
+              return (
+                <div key={m.id} style={{ padding:"8px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between" }}>
+                    <span>{productMap[v?.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v?.shortCode||"—"}</span></span>
+                    <Badge tone="rust">-{m.qty}</Badge>
+                  </div>
+                  <div style={{ color:C.sub, fontSize:12, marginTop:3 }}>
+                    {m.note ? `${m.note} · ` : ""}{m.loggedBy ? `logged by ${m.loggedBy}` : ""}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display:"flex", gap:24, flexWrap:"wrap" }}>
         <div style={{ flex:1, minWidth:300 }} className="card">
           <div style={{ padding:18 }}>
-            <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep, marginBottom:10 }}>Low stock (5 or fewer)</div>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+              <div style={{ width:26, height:26, borderRadius:7, background:C.goldSoft, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                <i className="ti ti-alert-triangle" style={{ fontSize:14, color:"#6B5310" }} aria-hidden="true"></i>
+              </div>
+              <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep }}>Low stock (5 or fewer)</div>
+            </div>
             {lowStock.length===0 && <div style={{ fontSize:13, color:C.sub }}>Nothing running low right now.</div>}
             {lowStock.slice(0,8).map(v => (
               <div key={v.id} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
-                <span>{productMap[v.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v.sku}</span></span>
+                <span>{productMap[v.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v.shortCode||"—"}</span></span>
                 <Badge tone="rust">Low</Badge>
               </div>
             ))}
@@ -427,11 +719,16 @@ function Dashboard({ products, variants, orders, movements, available, totalAvai
         </div>
         <div style={{ flex:1, minWidth:300 }} className="card">
           <div style={{ padding:18 }}>
-            <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep, marginBottom:10 }}>Needs attention</div>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+              <div style={{ width:26, height:26, borderRadius:7, background:C.rustSoft, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                <i className="ti ti-alert-circle" style={{ fontSize:14, color:C.rust }} aria-hidden="true"></i>
+              </div>
+              <div style={{ fontFamily:FONT_DISPLAY, fontSize:16, fontWeight:600, color:C.tealDeep }}>Needs attention</div>
+            </div>
             {negativeStock.length===0 && <div style={{ fontSize:13, color:C.sub }}>No stock is over-committed.</div>}
             {negativeStock.map(v => (
               <div key={v.id} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${C.line}`, fontSize:13 }}>
-                <span>{productMap[v.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v.sku}</span></span>
+                <span>{productMap[v.productId]?.name||"—"} <span style={{ color:C.sub, fontFamily:FONT_MONO, fontSize:12 }}>{v.shortCode||"—"}</span></span>
                 <Badge tone="rust">Over-blocked</Badge>
               </div>
 
@@ -443,24 +740,283 @@ function Dashboard({ products, variants, orders, movements, available, totalAvai
   );
 }
 
-function Products({ products, setProducts, variants, perms }) {
-  const [name, setName] = useState(""); const [code, setCode] = useState(""); const [category, setCategory] = useState("Chair");
+function Mockup({ products, variants, variantMap, productMap, samples, setSamples, perms, setTab }) {
+  const [customer, setCustomer] = useState("");
+  const [productId, setProductId] = useState("");
+  const [color, setColor] = useState("");
+  const [customColor, setCustomColor] = useState(false);
+  const [qty, setQty] = useState(1);
+  const [dateSent, setDateSent] = useState(today());
+  const [expectedReturn, setExpectedReturn] = useState("");
+  const [note, setNote] = useState("");
   const [q, setQ] = useState("");
+  const todayStr = today();
+
+  // Colors already used as variants for the selected product, so the person
+  // sending the sample can pick from known colors instead of retyping them.
+  const knownColors = useMemo(() => {
+    if (!productId) return [];
+    const set = new Set(variants.filter(v=>v.productId===productId).map(v=>v.colorCode).filter(Boolean));
+    return [...set];
+  }, [variants, productId]);
+
+  const addSample = () => {
+    if (!perms.canManageOrders || !customer.trim() || !productId || !color.trim() || !qty) return;
+    const s = { id:uid(), customer:customer.trim(), productId, color:color.trim(), qty:Number(qty), dateSent, expectedReturn, note:note.trim(), status:"with_client", ts:Date.now() };
+    setSamples([s, ...samples]);
+    setCustomer(""); setProductId(""); setColor(""); setCustomColor(false); setQty(1); setExpectedReturn(""); setNote("");
+  };
+
+  const setStatus = (id, status) => {
+    if (!perms.canManageOrders) return;
+    setSamples(samples.map(s => s.id===id ? { ...s, status } : s));
+  };
+
+  const removeSample = (id) => { if (!perms.canDelete) return; if (!window.confirm("Delete this sample record? This can't be undone.")) return; setSamples(samples.filter(s=>s.id!==id)); };
+
+  const filtered = samples.filter(s => {
+    if (!q.trim()) return true;
+    const term = q.trim().toLowerCase();
+    const p = productMap[s.productId];
+    return s.customer.toLowerCase().includes(term) || (p?.name||"").toLowerCase().includes(term) || (s.color||"").toLowerCase().includes(term);
+  });
+
+  const statusBadge = (s) => {
+    if (s.status === "with_client") {
+      const overdue = s.expectedReturn && s.expectedReturn < todayStr;
+      return overdue ? <Badge tone="rust">Overdue</Badge> : <Badge tone="gold">With client</Badge>;
+    }
+    if (s.status === "returned") return <Badge tone="sub">Returned</Badge>;
+    if (s.status === "ordered") return <Badge tone="green">Liked it — Ordered</Badge>;
+    return null;
+  };
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Fulfilment" title="Mockup samples" action={<SearchBox value={q} onChange={setQ} placeholder="Search customer, product, or color…" />} />
+      <div className="card" style={{ padding:"14px 18px", marginBottom:20, display:"flex", alignItems:"center", gap:12, background:C.tealSoft }}>
+        <i className="ti ti-info-circle" style={{ fontSize:18, color:C.tealDeep }} aria-hidden="true"></i>
+        <div style={{ fontSize:13, color:C.tealDeep }}>Track samples sent to clients — once they try it, mark it returned or, if they liked it, mark it as ordered.</div>
+      </div>
+
+      {perms.canManageOrders && (
+        <div className="card" style={{ padding:16, marginBottom:20 }}>
+          <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>Send a new sample</div>
+          <div style={{ display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap" }}>
+            <Field label="Customer"><input style={{width:170}} value={customer} onChange={e=>setCustomer(e.target.value)} placeholder="Customer name" /></Field>
+            <Field label="Product">
+              <ProductAutocomplete products={products} value={productId} onChange={val=>{ setProductId(val); setColor(""); setCustomColor(false); }} placeholder="Type a product…" width={190} />
+            </Field>
+            <Field label="Color">
+              {knownColors.length>0 && !customColor ? (
+                <select style={{width:150}} value={color} onChange={e=>{ if (e.target.value==="__other__") { setCustomColor(true); setColor(""); } else { setColor(e.target.value); } }}>
+                  <option value="">Select</option>
+                  {knownColors.map(c=><option key={c} value={c}>{c}</option>)}
+                  <option value="__other__">Other…</option>
+                </select>
+              ) : (
+                <input style={{width:150}} value={color} onChange={e=>setColor(e.target.value)} placeholder="Color code" disabled={!productId} autoFocus={customColor} />
+              )}
+            </Field>
+            <Field label="Qty"><input type="number" min="1" style={{width:70}} value={qty} onChange={e=>setQty(e.target.value)} /></Field>
+            <Field label="Sent on"><input type="date" style={{width:150}} value={dateSent} onChange={e=>setDateSent(e.target.value)} /></Field>
+            <Field label="Expected return"><input type="date" style={{width:150}} value={expectedReturn} onChange={e=>setExpectedReturn(e.target.value)} /></Field>
+            <Field label="Note"><input style={{width:160}} value={note} onChange={e=>setNote(e.target.value)} placeholder="Optional" /></Field>
+            <Btn variant="primary" onClick={addSample}><i className="ti ti-send" style={{verticalAlign:-2,marginRight:4}}></i>Send sample</Btn>
+          </div>
+        </div>
+      )}
+
+      <div className="card">
+        <table>
+          <thead><tr style={{background:C.tealSoft}}><th>Customer</th><th>Product</th><th>Color</th><th style={{textAlign:"right"}}>Qty</th><th>Sent</th><th>Expected return</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {filtered.length===0 && <tr><td colSpan={8} style={{padding:18,color:C.sub,textAlign:"center"}}>{samples.length===0 ? "No samples sent yet." : "No samples match your search."}</td></tr>}
+            {filtered.map(s => {
+              const p = productMap[s.productId];
+              const overdue = s.status==="with_client" && s.expectedReturn && s.expectedReturn < todayStr;
+              return (
+                <tr key={s.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: overdue?`3px dashed ${C.rust}`:"3px solid transparent"}}>
+                  <td>{s.customer}</td>
+                  <td>{p?.name||"—"}</td>
+                  <td style={{fontFamily:FONT_MONO,fontSize:12,fontWeight:600}}>{s.color||"—"}</td>
+                  <td style={{textAlign:"right"}}>{s.qty}</td>
+                  <td>{s.dateSent}</td>
+                  <td>{s.expectedReturn||"—"}</td>
+                  <td>{statusBadge(s)}</td>
+                  <td style={{textAlign:"right", whiteSpace:"nowrap"}}>
+                    {perms.canManageOrders && s.status==="with_client" && (
+                      <>
+                        <Btn variant="ghost" onClick={()=>setStatus(s.id,"returned")} style={{marginRight:6}}>Mark returned</Btn>
+                        <Btn variant="primary" onClick={()=>setStatus(s.id,"ordered")} style={{marginRight:6}}>Liked it — Order</Btn>
+                      </>
+                    )}
+                    {perms.canDelete && <Btn variant="danger" onClick={()=>removeSample(s.id)}><i className="ti ti-trash" style={{verticalAlign:-2}}></i></Btn>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{fontSize:12,color:C.sub,marginTop:10}}>"Liked it — Order" just flags the sample as converted. Log the actual order and stock movement in the Orders tab.</div>
+    </div>
+  );
+}
+
+function Products({ products, setProducts, variants, setVariants, stock, setStock, samples, setSamples, perms }) {
+  const [name, setName] = useState(""); const [code, setCode] = useState(""); const [category, setCategory] = useState("Chair");
+  const [remark, setRemark] = useState("");
+  const [q, setQ] = useState("");
+  const [importMsg, setImportMsg] = useState("");
+  const [selected, setSelected] = useState(() => new Set());
+  const fileInputRef = useRef(null);
   const add = () => {
     if (!perms.canEditCatalogue || !name.trim() || !code.trim()) return;
-    setProducts([...products, { id:uid(), name:name.trim(), code:code.trim().toUpperCase(), category }]);
-    setName(""); setCode("");
+    setProducts([...products, { id:uid(), name:name.trim(), code:code.trim().toUpperCase(), category, remark:remark.trim() }]);
+    setName(""); setCode(""); setRemark("");
   };
-  const remove = (id) => { if (!perms.canDelete) return; setProducts(products.filter(x=>x.id!==id)); };
+  const updateRemark = (id, val) => {
+    if (!perms.canEditCatalogue) return;
+    setProducts(products.map(p => p.id===id ? { ...p, remark: val } : p));
+  };
+  const remove = (id) => { if (!perms.canDelete) return; if (!window.confirm("Delete this product? Its variants and stock history will stay, but the product itself will be removed.")) return; setProducts(products.filter(x=>x.id!==id)); };
+  const toggleSelect = (id) => setSelected(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  const toggleSelectAll = (rows) => setSelected(prev => {
+    const allSelected = rows.length>0 && rows.every(p=>prev.has(p.id));
+    if (allSelected) return new Set();
+    return new Set(rows.map(p=>p.id));
+  });
+  const bulkRemove = () => {
+    if (!perms.canDelete || selected.size===0) return;
+    if (!window.confirm(`Delete ${selected.size} selected product${selected.size===1?"":"s"}? Their variants and stock history will stay, but the products themselves will be removed.`)) return;
+    setProducts(products.filter(p=>!selected.has(p.id)));
+    setSelected(new Set());
+  };
+
+  // Very small CSV parser — handles quoted fields with commas, no external lib needed.
+  const parseCsv = (text) => {
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    return lines.map(line => {
+      const cells = []; let cur = ""; let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') { inQuotes = !inQuotes; }
+        else if (ch === "," && !inQuotes) { cells.push(cur); cur = ""; }
+        else { cur += ch; }
+      }
+      cells.push(cur);
+      return cells.map(c => c.trim().replace(/^"|"$/g, ""));
+    });
+  };
+
+  const downloadTemplate = () => {
+    const csv = "Product name,Product code,Category,Colour code,Size,Available stock\nSofa 3-seater,SFA,Sofa,XP-01-FP9817,6x3 ft,10\nDining Chair,CHR,Chair,Black,Standard,25\n";
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "products_template.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Finds a header column by trying a few likely names (case-insensitive, ignores spaces/underscores).
+  const findCol = (header, candidates) => {
+    const norm = (s) => s.toLowerCase().replace(/[\s_]+/g, " ").trim();
+    const normHeader = header.map(norm);
+    for (const c of candidates) {
+      const idx = normHeader.indexOf(norm(c));
+      if (idx > -1) return idx;
+    }
+    return -1;
+  };
+
+  const handleImportFile = (e) => {
+    const file = e.target.files[0];
+    if (!file || !perms.isAdmin) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const rows = parseCsv(String(ev.target.result));
+      if (rows.length < 2) { setImportMsg("File looks empty — nothing to import."); return; }
+      const header = rows[0];
+      const nameIdx = findCol(header, ["product name", "name", "product"]);
+      const codeIdx = findCol(header, ["product code", "code"]);
+      const catIdx = findCol(header, ["category"]);
+      const colorIdx = findCol(header, ["colour code", "color code", "colour", "color"]);
+      const sizeIdx = findCol(header, ["size"]);
+      const availIdx = findCol(header, ["available stock", "available", "stock", "quantity", "qty"]);
+      if (nameIdx === -1 || codeIdx === -1) {
+        setImportMsg('CSV needs "Product name" and "Product code" columns (header row).');
+        return;
+      }
+
+      // Work on local copies so codes/variants added mid-file are recognised by later rows.
+      const nextProducts = [...products];
+      const nextVariants = [...variants];
+      const nextStock = { ...stock };
+      const productByCode = new Map(nextProducts.map(p => [p.code.toUpperCase(), p]));
+      let productsAdded = 0, variantsAdded = 0, variantsUpdated = 0;
+
+      rows.slice(1).forEach(r => {
+        const nm = (r[nameIdx] || "").trim();
+        const cd = (r[codeIdx] || "").trim().toUpperCase();
+        if (!nm || !cd) return;
+        const colorCode = colorIdx > -1 ? (r[colorIdx] || "").trim() : "";
+        const size = sizeIdx > -1 ? (r[sizeIdx] || "").trim() : "";
+        const availStock = availIdx > -1 ? Number(r[availIdx]) || 0 : 0;
+        let cat = catIdx > -1 ? (r[catIdx] || "").trim() : "Other";
+        if (!CATEGORIES.includes(cat)) cat = "Other";
+
+        // Reuse the product if the code already exists (in Firestore or earlier in this file), else create it.
+        let product = productByCode.get(cd);
+        if (!product) {
+          product = { id: uid(), name: nm, code: cd, category: cat };
+          nextProducts.push(product);
+          productByCode.set(cd, product);
+          productsAdded++;
+        }
+
+        if (!colorCode && !size) return; // no variant info on this row — product-only row
+
+        // Match an existing variant by product + colour code + size.
+        const existing = nextVariants.find(v => v.productId === product.id && (v.colorCode||"").toLowerCase() === colorCode.toLowerCase() && (v.size||"").toLowerCase() === size.toLowerCase());
+        if (existing) {
+          // Update opening stock so "available" comes out to the value given, without
+          // touching any in/out/blocked history that already built up on this variant.
+          const s = nextStock[existing.id] || { opening:0, in:0, out:0, blocked:0 };
+          const newOpening = availStock - (s.in||0) + (s.out||0) + (s.blocked||0);
+          nextStock[existing.id] = { ...s, opening: newOpening };
+          variantsUpdated++;
+        } else {
+          const v = { id: uid(), productId: product.id, colorCode, seatColor: "", headrest: "No", size };
+          v.sku = makeSku(product, v);
+          v.shortCode = makeShortCode(product, nextVariants);
+          nextVariants.push(v);
+          nextStock[v.id] = { opening: availStock, in: 0, out: 0, blocked: 0 };
+          variantsAdded++;
+        }
+      });
+
+      if (productsAdded > 0) setProducts(nextProducts);
+      if (variantsAdded > 0 || variantsUpdated > 0) { setVariants(nextVariants); setStock(nextStock); }
+
+      const parts = [`${productsAdded} new product${productsAdded===1?"":"s"}`, `${variantsAdded} new variant${variantsAdded===1?"":"s"}`];
+      if (variantsUpdated > 0) parts.push(`${variantsUpdated} existing variant${variantsUpdated===1?"":"s"} updated to the given available stock`);
+      setImportMsg(`Imported: ${parts.join(", ")}.`);
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+
   const filtered = products.filter(p => {
     const s = q.trim().toLowerCase();
     if (!s) return true;
-    return p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s) || (p.category||"").toLowerCase().includes(s);
+    return p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s) || (p.category||"").toLowerCase().includes(s) || (p.remark||"").toLowerCase().includes(s);
   });
 
   return (
     <div>
-      <SectionHeader eyebrow="Catalogue" title="Products" action={<SearchBox value={q} onChange={setQ} placeholder="Search products…" />} />
+      <SectionHeader eyebrow="Catalogue" title="Products" action={<SearchBox value={q} onChange={setQ} placeholder="Search name, code, remark…" />} />
       {perms.canEditCatalogue && (
         <div style={{ display:"flex", gap:10, marginBottom:20, alignItems:"flex-end", flexWrap:"wrap" }}>
           <Field label="Product name"><input style={{width:220}} value={name} onChange={e=>setName(e.target.value)} placeholder="Sofa 3-seater" /></Field>
@@ -468,22 +1024,49 @@ function Products({ products, setProducts, variants, perms }) {
           <Field label="Category">
             <select style={{width:130}} value={category} onChange={e=>setCategory(e.target.value)}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select>
           </Field>
+          <Field label="Remark"><input style={{width:180}} value={remark} onChange={e=>setRemark(e.target.value)} placeholder="e.g. 2 units damaged" /></Field>
           <Btn variant="primary" onClick={add}><i className="ti ti-plus" style={{verticalAlign:-2,marginRight:4}}></i>Add product</Btn>
+        </div>
+      )}
+      {perms.isAdmin && (
+        <div className="card" style={{ padding:16, marginBottom:20 }}>
+          <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:6, textTransform:"uppercase", letterSpacing:"0.04em" }}>Bulk import (Admin only)</div>
+          <div style={{ fontSize:12, color:C.sub, marginBottom:10 }}>Upload a CSV with <code>Product name</code>, <code>Product code</code>, <code>Category</code>, <code>Colour code</code>, <code>Size</code>, <code>Available stock</code> columns. One row = one variant. Existing product codes are reused (not duplicated) — <code>Category</code> must be Chair, Table, Sofa, or Other; anything else (or blank) becomes Other, and it's only applied when creating a new product. If a product + colour + size combo already exists, its stock is updated to match the value you give — otherwise a new variant is created.</div>
+          <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+            <Btn variant="ghost" onClick={downloadTemplate}><i className="ti ti-download" style={{verticalAlign:-2,marginRight:4}}></i>Download template</Btn>
+            <Btn variant="primary" onClick={()=>fileInputRef.current && fileInputRef.current.click()}><i className="ti ti-upload" style={{verticalAlign:-2,marginRight:4}}></i>Import CSV</Btn>
+            <input ref={fileInputRef} type="file" accept=".csv" onChange={handleImportFile} style={{ display:"none" }} />
+          </div>
+          {importMsg && <div style={{ fontSize:12, color:C.tealDeep, marginTop:10 }}>{importMsg}</div>}
         </div>
       )}
       {!perms.canEditCatalogue && !perms.readOnly && (
         <div style={{ fontSize:12, color:C.sub, marginBottom:14 }}>Only admin can add or remove products. You can still view the catalogue.</div>
       )}
       <div className="card">
+        {perms.canDelete && selected.size>0 && (
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 14px", background:C.rustSoft, borderBottom:`1px solid ${C.line}` }}>
+            <span style={{ fontSize:12, color:C.tealDeep, fontWeight:600 }}>{selected.size} selected</span>
+            <Btn variant="danger" onClick={bulkRemove}><i className="ti ti-trash" style={{verticalAlign:-2,marginRight:4}}></i>Delete selected</Btn>
+          </div>
+        )}
         <table>
-          <thead><tr style={{background:C.tealSoft}}><th>Product</th><th>Code</th><th>Category</th><th>Variants</th><th></th></tr></thead>
+          <thead><tr style={{background:C.tealSoft}}>
+            {perms.canDelete && <th style={{width:36}}><input type="checkbox" checked={filtered.length>0 && filtered.every(p=>selected.has(p.id))} onChange={()=>toggleSelectAll(filtered)} /></th>}
+            <th>Product</th><th>Code</th><th>Category</th><th>Variants</th><th>Remark</th><th></th></tr></thead>
           <tbody>
-            {filtered.length===0 && <tr><td colSpan={5} style={{padding:18,color:C.sub,textAlign:"center"}}>{products.length===0 ? "No products yet." : "No products match your search."}</td></tr>}
+            {filtered.length===0 && <tr><td colSpan={perms.canDelete?7:6} style={{padding:18,color:C.sub,textAlign:"center"}}>{products.length===0 ? "No products yet." : "No products match your search."}</td></tr>}
             {filtered.map(p => (
-              <tr key={p.id} style={{borderTop:`1px solid ${C.line}`}}>
+              <tr key={p.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: p.remark?`3px dashed ${C.rust}`:"3px solid transparent"}}>
+                {perms.canDelete && <td><input type="checkbox" checked={selected.has(p.id)} onChange={()=>toggleSelect(p.id)} /></td>}
                 <td>{p.name}</td><td style={{fontFamily:FONT_MONO}}>{p.code}</td>
                 <td><Badge tone="teal">{p.category||"Other"}</Badge></td>
                 <td>{variants.filter(v=>v.productId===p.id).length}</td>
+                <td>
+                  {perms.canEditCatalogue ? (
+                    <input key={p.remark||""} defaultValue={p.remark||""} onBlur={e=>{ if (e.target.value !== (p.remark||"")) updateRemark(p.id, e.target.value); }} placeholder="e.g. 2 units damaged" style={{width:160, fontSize:12, color: p.remark?C.rust:C.sub}} />
+                  ) : (p.remark ? <span style={{fontSize:12,color:C.rust}}>{p.remark}</span> : "—")}
+                </td>
                 <td style={{textAlign:"right"}}>
                   {perms.canDelete && <Btn variant="danger" onClick={()=>remove(p.id)}><i className="ti ti-trash" style={{verticalAlign:-2}}></i></Btn>}
                 </td>
@@ -500,37 +1083,54 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
   const [productId, setProductId] = useState(""); const [colorCode, setColorCode] = useState("");
   const [seatColor, setSeatColor] = useState(""); const [headrest, setHeadrest] = useState("No");
   const [size, setSize] = useState(""); const [opening, setOpening] = useState(0);
+  const [remark, setRemark] = useState("");
   const [q, setQ] = useState("");
+  const [selected, setSelected] = useState(() => new Set());
   const selectedProduct = products.find(p=>p.id===productId);
   const isChair = selectedProduct?.category === "Chair";
 
   const add = () => {
     if (!perms.canEditVariants || !productId || !colorCode.trim()) return;
-    const v = { id:uid(), productId, colorCode:colorCode.trim(), seatColor: isChair?seatColor.trim():"", headrest: isChair?headrest:"No", size:size.trim() };
+    const v = { id:uid(), productId, colorCode:colorCode.trim(), seatColor: isChair?seatColor.trim():"", headrest: isChair?headrest:"No", size:size.trim(), remark:remark.trim() };
     v.sku = makeSku(selectedProduct, v);
+    v.shortCode = makeShortCode(selectedProduct, variants);
     setVariants([...variants, v]);
     setStock({ ...stock, [v.id]: { opening:Number(opening)||0, in:0, out:0, blocked:0 } });
-    setColorCode(""); setSeatColor(""); setHeadrest("No"); setSize(""); setOpening(0);
+    setColorCode(""); setSeatColor(""); setHeadrest("No"); setSize(""); setOpening(0); setRemark("");
   };
-  const remove = (id) => { if (!perms.canDelete) return; setVariants(variants.filter(v=>v.id!==id)); };
+  const updateRemark = (id, val) => {
+    if (!perms.canEditVariants) return;
+    setVariants(variants.map(v => v.id===id ? { ...v, remark: val } : v));
+  };
+  const remove = (id) => { if (!perms.canDelete) return; if (!window.confirm("Delete this variant? Its stock history will stay, but the variant itself will be removed.")) return; setVariants(variants.filter(v=>v.id!==id)); };
+  const toggleSelect = (id) => setSelected(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  const toggleSelectAll = (rows) => setSelected(prev => {
+    const allSelected = rows.length>0 && rows.every(v=>prev.has(v.id));
+    if (allSelected) return new Set();
+    return new Set(rows.map(v=>v.id));
+  });
+  const bulkRemove = () => {
+    if (!perms.canDelete || selected.size===0) return;
+    if (!window.confirm(`Delete ${selected.size} selected variant${selected.size===1?"":"s"}? Their stock history will stay, but the variants themselves will be removed.`)) return;
+    setVariants(variants.filter(v=>!selected.has(v.id)));
+    setSelected(new Set());
+  };
   const filtered = variants.filter(v => {
     const s = q.trim().toLowerCase();
     if (!s) return true;
     const p = products.find(x=>x.id===v.productId);
-    return v.sku.toLowerCase().includes(s) || (p?.name||"").toLowerCase().includes(s) || (v.colorCode||"").toLowerCase().includes(s) || (v.size||"").toLowerCase().includes(s);
+    return (v.shortCode||"").toLowerCase().includes(s) || (p?.name||"").toLowerCase().includes(s) || (v.colorCode||"").toLowerCase().includes(s) || (v.size||"").toLowerCase().includes(s) || (v.remark||"").toLowerCase().includes(s);
   });
 
   return (
     <div>
-      <SectionHeader eyebrow="Catalogue" title="Variants" action={<SearchBox value={q} onChange={setQ} placeholder="Search SKU, color, size…" />} />
+      <SectionHeader eyebrow="Catalogue" title="Variants" action={<SearchBox value={q} onChange={setQ} placeholder="Search code, color, size, remark…" />} />
       {products.length===0 ? <div style={{color:C.sub,fontSize:13}}>Add a product first.</div> : (
         <>
           {perms.canEditVariants && (
             <div style={{ display:"flex", gap:10, marginBottom:20, alignItems:"flex-end", flexWrap:"wrap" }}>
               <Field label="Product">
-                <select style={{width:170}} value={productId} onChange={e=>setProductId(e.target.value)}>
-                  <option value="">Select</option>{products.map(p=><option key={p.id} value={p.id}>{p.name} ({p.category||"Other"})</option>)}
-                </select>
+                <ProductAutocomplete products={products} value={productId} onChange={setProductId} placeholder="Type a product…" width={200} />
               </Field>
               <Field label="Color code"><input style={{width:140}} value={colorCode} onChange={e=>setColorCode(e.target.value)} placeholder="XP-01-FP9817" /></Field>
               {isChair && <>
@@ -539,25 +1139,42 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
               </>}
               <Field label="Size"><input style={{width:90}} value={size} onChange={e=>setSize(e.target.value)} placeholder="6x3 ft" /></Field>
               <Field label="Opening stock"><input type="number" style={{width:100}} value={opening} onChange={e=>setOpening(e.target.value)} /></Field>
+              <Field label="Remark"><input style={{width:160}} value={remark} onChange={e=>setRemark(e.target.value)} placeholder="e.g. 2 units damaged" /></Field>
               <Btn variant="primary" onClick={add}><i className="ti ti-plus" style={{verticalAlign:-2,marginRight:4}}></i>Add variant</Btn>
             </div>
           )}
           <div className="card">
+            {perms.canDelete && selected.size>0 && (
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 14px", background:C.rustSoft, borderBottom:`1px solid ${C.line}` }}>
+                <span style={{ fontSize:12, color:C.tealDeep, fontWeight:600 }}>{selected.size} selected</span>
+                <Btn variant="danger" onClick={bulkRemove}><i className="ti ti-trash" style={{verticalAlign:-2,marginRight:4}}></i>Delete selected</Btn>
+              </div>
+            )}
             <table>
-              <thead><tr style={{background:C.tealSoft}}><th>SKU</th><th>Product</th><th>Category</th><th>Color</th><th>Seat</th><th>Headrest</th><th>Size</th><th></th></tr></thead>
+              <thead><tr style={{background:C.tealSoft}}>
+                {perms.canDelete && <th style={{width:36}}><input type="checkbox" checked={filtered.length>0 && filtered.every(v=>selected.has(v.id))} onChange={()=>toggleSelectAll(filtered)} /></th>}
+                <th>Code</th><th>Product</th><th>Category</th><th>Color</th><th>Seat</th><th>Headrest</th><th>Size</th><th>Remark</th><th></th></tr></thead>
               <tbody>
-                {filtered.length===0 && <tr><td colSpan={8} style={{padding:18,color:C.sub,textAlign:"center"}}>{variants.length===0 ? "No variants yet." : "No variants match your search."}</td></tr>}
+                {filtered.length===0 && <tr><td colSpan={perms.canDelete?10:9} style={{padding:18,color:C.sub,textAlign:"center"}}>{variants.length===0 ? "No variants yet." : "No variants match your search."}</td></tr>}
                 {filtered.map(v => {
                   const p = products.find(x=>x.id===v.productId); const chair = p?.category==="Chair";
                   return (
-                    <tr key={v.id} style={{borderTop:`1px solid ${C.line}`}}>
-                      <td style={{fontFamily:FONT_MONO,fontSize:12}}>{v.sku}</td>
+                    <tr key={v.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: v.remark?`3px dashed ${C.rust}`:"3px solid transparent"}}>
+                      {perms.canDelete && <td><input type="checkbox" checked={selected.has(v.id)} onChange={()=>toggleSelect(v.id)} /></td>}
+                      <td>
+                        <div style={{fontFamily:FONT_MONO,fontSize:13,fontWeight:600,color:C.tealDeep}}>{v.shortCode||"—"}</div>
+                      </td>
                       <td>{p?.name||"—"}</td>
                       <td><Badge tone="teal">{p?.category||"Other"}</Badge></td>
                       <td>{v.colorCode}</td>
                       <td>{chair?(v.seatColor||"—"):"—"}</td>
                       <td>{chair?(v.headrest==="Yes"?<Badge tone="gold">Yes</Badge>:"No"):"—"}</td>
                       <td>{v.size||"—"}</td>
+                      <td>
+                        {perms.canEditVariants ? (
+                          <input key={v.remark||""} defaultValue={v.remark||""} onBlur={e=>{ if (e.target.value !== (v.remark||"")) updateRemark(v.id, e.target.value); }} placeholder="e.g. 2 units damaged" style={{width:150, fontSize:12, color: v.remark?C.rust:C.sub}} />
+                        ) : (v.remark ? <span style={{fontSize:12,color:C.rust}}>{v.remark}</span> : "—")}
+                      </td>
                       <td style={{textAlign:"right"}}>{perms.canDelete && <Btn variant="danger" onClick={()=>remove(v.id)}><i className="ti ti-trash" style={{verticalAlign:-2}}></i></Btn>}</td>
                     </tr>
                   );
@@ -575,6 +1192,7 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
   const [filterProduct, setFilterProduct] = useState("");
   const [q, setQ] = useState("");
   const [moveVariant, setMoveVariant] = useState("");
+  const [moveProduct, setMoveProduct] = useState("");
   const [moveType, setMoveType] = useState("in");
   const [moveQty, setMoveQty] = useState(1);
   const [moveDate, setMoveDate] = useState(today());
@@ -584,19 +1202,21 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
     if (filterProduct && v.productId !== filterProduct) return false;
     const s = q.trim().toLowerCase();
     if (!s) return true;
-    return v.sku.toLowerCase().includes(s) || (productMap[v.productId]?.name||"").toLowerCase().includes(s);
+    return (v.shortCode||"").toLowerCase().includes(s) || (productMap[v.productId]?.name||"").toLowerCase().includes(s);
   });
 
   const submitMove = () => {
     logMovement(moveVariant, moveType, moveQty, moveDate, moveNote);
-    setMoveVariant(""); setMoveQty(1); setMoveNote("");
+    setMoveVariant(""); setMoveProduct(""); setMoveQty(1); setMoveNote("");
   };
+
+  const moveVariantOptions = moveProduct ? variants.filter(v=>v.productId===moveProduct) : variants;
 
   const exportSnapshot = () => {
     const rows = list.map(v => {
       const s = getStock(v.id);
       return {
-        SKU: v.sku,
+        Code: v.shortCode || "",
         Product: productMap[v.productId]?.name || "",
         Category: productMap[v.productId]?.category || "",
         Opening: s.opening||0,
@@ -613,7 +1233,7 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
     <div>
       <SectionHeader eyebrow="Ledger" title="Stock ledger" action={
         <div style={{ display:"flex", gap:10 }}>
-          <SearchBox value={q} onChange={setQ} placeholder="Search SKU or product…" />
+          <SearchBox value={q} onChange={setQ} placeholder="Search code or product…" />
           <select style={{width:160}} value={filterProduct} onChange={e=>setFilterProduct(e.target.value)}>
             <option value="">All products</option>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
@@ -622,13 +1242,14 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
       } />
 
       {perms.canEditStock && (
-        <div className="card" style={{ padding:16, marginBottom:20 }}>
+        <div className="card" style={{ padding:16, marginBottom:20, overflow:"visible" }}>
           <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>Log a stock movement</div>
           <div style={{ display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap" }}>
-            <Field label="Variant (SKU)">
-              <select style={{width:220}} value={moveVariant} onChange={e=>setMoveVariant(e.target.value)}>
-                <option value="">Select</option>{variants.map(v=><option key={v.id} value={v.id}>{v.sku}</option>)}
-              </select>
+            <Field label="Product">
+              <ProductAutocomplete products={products} value={moveProduct} onChange={val=>{ setMoveProduct(val); setMoveVariant(""); }} placeholder="All products" width={180} allowAll={true} />
+            </Field>
+            <Field label="Code">
+              <VariantAutocomplete options={moveVariantOptions} productMap={productMap} value={moveVariant} onChange={setMoveVariant} placeholder="Type code or color…" width={200} />
             </Field>
             <Field label="Type">
               <select style={{width:100}} value={moveType} onChange={e=>setMoveType(e.target.value)}>
@@ -645,14 +1266,16 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
 
       <div className="card">
         <table>
-          <thead><tr style={{background:C.tealSoft}}><th>SKU</th><th>Product</th><th style={{textAlign:"right"}}>Opening</th><th style={{textAlign:"right"}}>In</th><th style={{textAlign:"right"}}>Out</th><th style={{textAlign:"right"}}>Blocked</th><th style={{textAlign:"right"}}>Available</th></tr></thead>
+          <thead><tr style={{background:C.tealSoft}}><th>Code</th><th>Product</th><th style={{textAlign:"right"}}>Opening</th><th style={{textAlign:"right"}}>In</th><th style={{textAlign:"right"}}>Out</th><th style={{textAlign:"right"}}>Blocked</th><th style={{textAlign:"right"}}>Available</th></tr></thead>
           <tbody>
             {list.length===0 && <tr><td colSpan={7} style={{padding:18,color:C.sub,textAlign:"center"}}>No stock rows match.</td></tr>}
             {list.map(v => {
               const s = getStock(v.id); const avail = available(v.id); const hasBlock = (s.blocked||0) > 0;
               return (
                 <tr key={v.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: hasBlock?`3px dashed ${C.gold}`:"3px solid transparent"}}>
-                  <td style={{fontFamily:FONT_MONO,fontSize:12}}>{v.sku}</td>
+                  <td>
+                    <div style={{fontFamily:FONT_MONO,fontSize:13,fontWeight:600,color:C.tealDeep}}>{v.shortCode||"—"}</div>
+                  </td>
                   <td>{productMap[v.productId]?.name||"—"}</td>
                   <td style={{textAlign:"right"}}><input type="number" disabled={!perms.canEditStock} value={s.opening} onChange={e=>setOpening(v.id,e.target.value)} style={{width:64,textAlign:"right",padding:"5px 6px"}} /></td>
                   <td style={{textAlign:"right",fontFamily:FONT_MONO,color:C.green}}>{s.in||0}</td>
@@ -695,7 +1318,7 @@ function Reports({ movements, variantMap, productMap, products }) {
     if (toDate && m.date > toDate) return false;
     const s = q.trim().toLowerCase();
     if (s) {
-      const hay = `${v?.sku||""} ${productMap[v?.productId]?.name||""} ${m.note||""}`.toLowerCase();
+      const hay = `${v?.shortCode||""} ${productMap[v?.productId]?.name||""} ${m.note||""}`.toLowerCase();
       if (!hay.includes(s)) return false;
     }
     return true;
@@ -709,7 +1332,7 @@ function Reports({ movements, variantMap, productMap, products }) {
       const v = variantMap[m.variantId];
       return {
         Date: m.date,
-        SKU: v?.sku || "",
+        Code: v?.shortCode || "",
         Product: productMap[v?.productId]?.name || "",
         Type: m.type === "in" ? "Inward" : "Outward",
         Quantity: m.qty,
@@ -728,7 +1351,7 @@ function Reports({ movements, variantMap, productMap, products }) {
 
   return (
     <div>
-      <SectionHeader eyebrow="Movements" title="Day-by-day inward and outward report" action={<SearchBox value={q} onChange={setQ} placeholder="Search SKU, product, note…" />} />
+      <SectionHeader eyebrow="Movements" title="Day-by-day inward and outward report" action={<SearchBox value={q} onChange={setQ} placeholder="Search code, product, note…" />} />
 
       <div style={{ display:"flex", gap:8, marginBottom:14 }}>
         <Btn variant="ghost" onClick={()=>setPeriod("day")}>Today</Btn>
@@ -772,13 +1395,13 @@ function Reports({ movements, variantMap, productMap, products }) {
               </div>
             </div>
             <table>
-              <thead><tr><th>SKU</th><th>Product</th><th>Type</th><th style={{textAlign:"right"}}>Qty</th><th>Note</th><th>Logged by</th></tr></thead>
+              <thead><tr><th>Code</th><th>Product</th><th>Type</th><th style={{textAlign:"right"}}>Qty</th><th>Note</th><th>Logged by</th></tr></thead>
               <tbody>
                 {rows.map(m => {
                   const v = variantMap[m.variantId];
                   return (
                     <tr key={m.id} style={{borderTop:`1px solid ${C.line}`}}>
-                      <td style={{fontFamily:FONT_MONO,fontSize:12}}>{v?.sku||"—"}</td>
+                      <td style={{fontFamily:FONT_MONO,fontSize:12,fontWeight:600}}>{v?.shortCode||"—"}</td>
                       <td>{productMap[v?.productId]?.name||"—"}</td>
                       <td>{m.type==="in" ? <Badge tone="green">Inward</Badge> : <Badge tone="rust">Outward</Badge>}</td>
                       <td style={{textAlign:"right",fontFamily:FONT_MONO}}>{m.qty}</td>
@@ -796,7 +1419,7 @@ function Reports({ movements, variantMap, productMap, products }) {
   );
 }
 
-function Orders({ variants, variantMap, orders, setOrders, stock, setStock, available, perms }) {
+function Orders({ variants, variantMap, productMap, orders, setOrders, stock, setStock, available, perms }) {
   const [customer, setCustomer] = useState(""); const [variantId, setVariantId] = useState("");
   const [qty, setQty] = useState(1); const [error, setError] = useState("");
   const [q, setQ] = useState("");
@@ -829,20 +1452,19 @@ function Orders({ variants, variantMap, orders, setOrders, stock, setStock, avai
   const filteredOrders = orders.filter(o => {
     const s = q.trim().toLowerCase();
     if (!s) return true;
-    const sku = variantMap[o.items[0].variantId]?.sku || "";
-    return o.customer.toLowerCase().includes(s) || sku.toLowerCase().includes(s);
+    const v0 = variantMap[o.items[0].variantId];
+    const code = v0?.shortCode || "";
+    return o.customer.toLowerCase().includes(s) || code.toLowerCase().includes(s);
   });
 
   return (
     <div>
-      <SectionHeader eyebrow="Fulfilment" title="Orders & stock blocking" action={<SearchBox value={q} onChange={setQ} placeholder="Search customer or SKU…" />} />
+      <SectionHeader eyebrow="Fulfilment" title="Orders & stock blocking" action={<SearchBox value={q} onChange={setQ} placeholder="Search customer or code…" />} />
       {perms.canManageOrders && (
         <div style={{ display:"flex", gap:10, marginBottom:10, alignItems:"flex-end", flexWrap:"wrap" }}>
           <Field label="Customer"><input style={{width:180}} value={customer} onChange={e=>setCustomer(e.target.value)} placeholder="Customer name" /></Field>
-          <Field label="Variant (SKU)">
-            <select style={{width:240}} value={variantId} onChange={e=>setVariantId(e.target.value)}>
-              <option value="">Select</option>{variants.map(v=><option key={v.id} value={v.id}>{v.sku} — {available(v.id)} avail.</option>)}
-            </select>
+          <Field label="Variant (Code)">
+            <VariantAutocomplete options={variants} productMap={productMap} value={variantId} onChange={setVariantId} placeholder="Type code or color…" width={240} />
           </Field>
           <Field label="Quantity"><input type="number" min="1" style={{width:90}} value={qty} onChange={e=>setQty(e.target.value)} /></Field>
           <Btn variant="gold" onClick={createOrder}><i className="ti ti-lock" style={{verticalAlign:-2,marginRight:4}}></i>Block stock for order</Btn>
@@ -851,13 +1473,13 @@ function Orders({ variants, variantMap, orders, setOrders, stock, setStock, avai
       {error && <div style={{color:C.rust,fontSize:12,marginBottom:14}}>{error}</div>}
       <div className="card" style={{marginTop:14}}>
         <table>
-          <thead><tr style={{background:C.tealSoft}}><th>Customer</th><th>SKU</th><th style={{textAlign:"right"}}>Qty</th><th>Date</th><th>Status</th><th></th></tr></thead>
+          <thead><tr style={{background:C.tealSoft}}><th>Customer</th><th>Code</th><th style={{textAlign:"right"}}>Qty</th><th>Date</th><th>Status</th><th></th></tr></thead>
           <tbody>
             {filteredOrders.length===0 && <tr><td colSpan={6} style={{padding:18,color:C.sub,textAlign:"center"}}>{orders.length===0 ? "No orders yet." : "No orders match your search."}</td></tr>}
             {filteredOrders.map(o => (
               <tr key={o.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: o.status==="BLOCKED"?`3px dashed ${C.gold}`:"3px solid transparent"}}>
                 <td>{o.customer}</td>
-                <td style={{fontFamily:FONT_MONO,fontSize:12}}>{variantMap[o.items[0].variantId]?.sku||"—"}</td>
+                <td style={{fontFamily:FONT_MONO,fontSize:12,fontWeight:600}}>{variantMap[o.items[0].variantId]?.shortCode||"—"}</td>
                 <td style={{textAlign:"right"}}>{o.items[0].qty}</td>
                 <td>{o.date}</td>
                 <td><Badge tone={toneFor(o.status)}>{o.status}</Badge></td>
@@ -906,10 +1528,15 @@ function Users({ users }) {
 
   const revoke = async (uname) => {
     if (uname === "admin") { setMsg("Can't revoke the main admin account from here."); return; }
+    if (!window.confirm(`Revoke access for "${uname}"? They won't be able to use the app anymore.`)) return;
     await db.collection("users").doc(uname).delete();
   };
 
   const changeRole = async (uname, newRole) => {
+    if (uname === "admin" && newRole !== "admin") {
+      setMsg("Can't change the main admin account's role — it must stay Admin.");
+      return;
+    }
     await db.collection("users").doc(uname).set({ role: newRole });
   };
 
@@ -920,7 +1547,7 @@ function Users({ users }) {
         <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>Add a new login</div>
         <div style={{ display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap" }}>
           <Field label="Username"><input style={{width:160}} value={username} onChange={e=>setUsername(e.target.value)} placeholder="newuser" /></Field>
-          <Field label="Password"><input type="text" style={{width:160}} value={password} onChange={e=>setPassword(e.target.value)} placeholder="at least 6 characters" /></Field>
+          <Field label="Password"><input type="password" style={{width:160}} value={password} onChange={e=>setPassword(e.target.value)} placeholder="at least 6 characters" /></Field>
           <Field label="Role">
             <select style={{width:150}} value={role} onChange={e=>setRole(e.target.value)}>
               <option value="admin">Admin</option><option value="warehouse">Warehouse manager</option><option value="sales">Sales (view only)</option>
@@ -949,6 +1576,7 @@ function Users({ users }) {
           </tbody>
         </table>
       </div>
+      {msg && msg.includes("main admin") && <div style={{ fontSize:12, color:C.rust, marginTop:10 }}>{msg}</div>}
       <div style={{fontSize:12,color:C.sub,marginTop:10}}>Revoking access removes their app permissions immediately. Their login still technically exists in Firebase Authentication — delete it there too if you want it fully gone.</div>
     </div>
   );

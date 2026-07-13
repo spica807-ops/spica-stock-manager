@@ -2,8 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Spica Modular — Stock Manager</title>
+
+<!-- PWA: installable to home screen -->
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0A2B2C" />
+<link rel="icon" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Spica Stock" />
+
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.44.0/iconfont/tabler-icons.min.css" />
 <style>
@@ -828,6 +838,12 @@ function Mockup({ products, variants, variantMap, productMap, samples, setSample
     return null;
   };
 
+  const selectedRemark = (() => {
+    const p = productMap[productId];
+    const matchingVariant = productId && color ? variants.find(v => v.productId===productId && (v.colorCode||"").toLowerCase()===color.toLowerCase()) : null;
+    return [matchingVariant?.remark, p?.remark].filter(Boolean).join(" · ");
+  })();
+
   return (
     <div>
       <SectionHeader eyebrow="Fulfilment" title="Mockup samples" action={<SearchBox value={q} onChange={setQ} placeholder="Search customer, product, or color…" />} />
@@ -861,6 +877,11 @@ function Mockup({ products, variants, variantMap, productMap, samples, setSample
             <Field label="Note"><input style={{width:160}} value={note} onChange={e=>setNote(e.target.value)} placeholder="Optional" /></Field>
             <Btn variant="primary" onClick={addSample}><i className="ti ti-send" style={{verticalAlign:-2,marginRight:4}}></i>Send sample</Btn>
           </div>
+          {selectedRemark && (
+            <div style={{ color:C.rust, fontSize:12, marginTop:10, fontWeight:600 }}>
+              <i className="ti ti-alert-triangle" style={{verticalAlign:-2,marginRight:4}}></i>{selectedRemark}
+            </div>
+          )}
         </div>
       )}
 
@@ -872,10 +893,15 @@ function Mockup({ products, variants, variantMap, productMap, samples, setSample
             {filtered.map(s => {
               const p = productMap[s.productId];
               const overdue = s.status==="with_client" && s.expectedReturn && s.expectedReturn < todayStr;
+              const matchingVariant = variants.find(v => v.productId===s.productId && (v.colorCode||"").toLowerCase()===(s.color||"").toLowerCase());
+              const remarkText = [matchingVariant?.remark, p?.remark].filter(Boolean).join(" · ");
               return (
                 <tr key={s.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: overdue?`3px dashed ${C.rust}`:"3px solid transparent"}}>
                   <td>{s.customer}</td>
-                  <td>{p?.name||"—"}</td>
+                  <td>
+                    {p?.name||"—"}
+                    {remarkText && <div style={{ color:C.rust, fontSize:11, marginTop:2, fontWeight:600 }}><i className="ti ti-alert-triangle" style={{verticalAlign:-2,marginRight:3}}></i>{remarkText}</div>}
+                  </td>
                   <td style={{fontFamily:FONT_MONO,fontSize:12,fontWeight:600}}>{s.color||"—"}</td>
                   <td style={{textAlign:"right"}}>{s.qty}</td>
                   <td>{s.dateSent}</td>
@@ -1323,15 +1349,18 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
   const exportSnapshot = () => {
     const rows = list.map(v => {
       const s = getStock(v.id);
+      const p = productMap[v.productId];
       return {
         Code: v.shortCode || "",
-        Product: productMap[v.productId]?.name || "",
-        Category: productMap[v.productId]?.category || "",
+        Product: p?.name || "",
+        Category: p?.category || "",
+        Color: v.colorCode || "",
         Opening: s.opening||0,
         In: s.in||0,
         Out: s.out||0,
         Blocked: s.blocked||0,
         Available: available(v.id),
+        Remark: [v.remark, p?.remark].filter(Boolean).join(" · "),
       };
     });
     exportCsv(`stock-snapshot-${today()}.csv`, rows);
@@ -1379,13 +1408,29 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
             {list.length===0 && <tr><td colSpan={7} style={{padding:18,color:C.sub,textAlign:"center"}}>No stock rows match.</td></tr>}
             {list.map(v => {
               const s = getStock(v.id); const avail = available(v.id); const hasBlock = (s.blocked||0) > 0;
+              const p = productMap[v.productId];
+              const remarkText = [v.remark, p?.remark].filter(Boolean).join(" · ");
               return (
                 <tr key={v.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: hasBlock?`3px dashed ${C.gold}`:"3px solid transparent"}}>
                   <td>
                     <div style={{fontFamily:FONT_MONO,fontSize:13,fontWeight:600,color:C.tealDeep}}>{v.shortCode||"—"}</div>
                   </td>
-                  <td>{productMap[v.productId]?.name||"—"}</td>
-                  <td style={{textAlign:"right"}}><input type="number" disabled={!perms.canEditStock} value={s.opening} onChange={e=>setOpening(v.id,e.target.value)} style={{width:64,textAlign:"right",padding:"5px 6px"}} /></td>
+                  <td>
+                    {p?.name||"—"}
+                    {remarkText && <div style={{ color:C.rust, fontSize:11, marginTop:2, fontWeight:600 }}><i className="ti ti-alert-triangle" style={{verticalAlign:-2,marginRight:3}}></i>{remarkText}</div>}
+                  </td>
+                  <td style={{textAlign:"right"}}>
+                    <input
+                      type="number" disabled={!perms.canEditStock} defaultValue={s.opening} key={`${v.id}-${s.opening}`}
+                      onBlur={e=>{
+                        const next = e.target.value;
+                        if (Number(next) === Number(s.opening)) return;
+                        if (!window.confirm(`Change opening stock for ${v.shortCode||"this variant"} from ${s.opening||0} to ${next}?`)) { e.target.value = s.opening; return; }
+                        setOpening(v.id, next);
+                      }}
+                      style={{width:64,textAlign:"right",padding:"5px 6px"}}
+                    />
+                  </td>
                   <td style={{textAlign:"right",fontFamily:FONT_MONO,color:C.green}}>{s.in||0}</td>
                   <td style={{textAlign:"right",fontFamily:FONT_MONO,color:C.rust}}>{s.out||0}</td>
                   <td style={{textAlign:"right",fontFamily:FONT_MONO,color:hasBlock?"#6B5310":C.sub}}>{s.blocked||0}</td>
@@ -1557,6 +1602,11 @@ function Orders({ variants, variantMap, productMap, orders, setOrders, stock, se
     setStock(next);
   };
   const toneFor = (s) => s==="BLOCKED"?"gold":s==="CONFIRMED"?"green":s==="RELEASED"?"teal":"rust";
+  const selectedVariantRemark = (() => {
+    const v = variantMap[variantId]; if (!v) return "";
+    const p = productMap[v.productId];
+    return [v.remark, p?.remark].filter(Boolean).join(" · ");
+  })();
   const filteredOrders = orders.filter(o => {
     const s = q.trim().toLowerCase();
     if (!s) return true;
@@ -1569,13 +1619,20 @@ function Orders({ variants, variantMap, productMap, orders, setOrders, stock, se
     <div>
       <SectionHeader eyebrow="Fulfilment" title="Orders & stock blocking" action={<SearchBox value={q} onChange={setQ} placeholder="Search customer or code…" />} />
       {perms.canManageOrders && (
-        <div style={{ display:"flex", gap:10, marginBottom:10, alignItems:"flex-end", flexWrap:"wrap" }}>
-          <Field label="Customer"><input style={{width:180}} value={customer} onChange={e=>setCustomer(e.target.value)} placeholder="Customer name" /></Field>
-          <Field label="Variant (Code)">
-            <VariantAutocomplete options={variants} productMap={productMap} value={variantId} onChange={setVariantId} placeholder="Type code or color…" width={240} />
-          </Field>
-          <Field label="Quantity"><input type="number" min="1" style={{width:90}} value={qty} onChange={e=>setQty(e.target.value)} /></Field>
-          <Btn variant="gold" onClick={createOrder}><i className="ti ti-lock" style={{verticalAlign:-2,marginRight:4}}></i>Block stock for order</Btn>
+        <div style={{ marginBottom:10 }}>
+          <div style={{ display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap" }}>
+            <Field label="Customer"><input style={{width:180}} value={customer} onChange={e=>setCustomer(e.target.value)} placeholder="Customer name" /></Field>
+            <Field label="Variant (Code)">
+              <VariantAutocomplete options={variants} productMap={productMap} value={variantId} onChange={setVariantId} placeholder="Type code or color…" width={240} />
+            </Field>
+            <Field label="Quantity"><input type="number" min="1" style={{width:90}} value={qty} onChange={e=>setQty(e.target.value)} /></Field>
+            <Btn variant="gold" onClick={createOrder}><i className="ti ti-lock" style={{verticalAlign:-2,marginRight:4}}></i>Block stock for order</Btn>
+          </div>
+          {selectedVariantRemark && (
+            <div style={{ color:C.rust, fontSize:12, marginTop:8, fontWeight:600 }}>
+              <i className="ti ti-alert-triangle" style={{verticalAlign:-2,marginRight:4}}></i>{selectedVariantRemark}
+            </div>
+          )}
         </div>
       )}
       {error && <div style={{color:C.rust,fontSize:12,marginBottom:14}}>{error}</div>}
@@ -1584,10 +1641,17 @@ function Orders({ variants, variantMap, productMap, orders, setOrders, stock, se
           <thead><tr style={{background:C.tealSoft}}><th>Customer</th><th>Code</th><th style={{textAlign:"right"}}>Qty</th><th>Date</th><th>Status</th><th></th></tr></thead>
           <tbody>
             {filteredOrders.length===0 && <tr><td colSpan={6} style={{padding:18,color:C.sub,textAlign:"center"}}>{orders.length===0 ? "No orders yet." : "No orders match your search."}</td></tr>}
-            {filteredOrders.map(o => (
+            {filteredOrders.map(o => {
+              const v0 = variantMap[o.items[0].variantId];
+              const p0 = productMap[v0?.productId];
+              const remarkText = v0 ? [v0.remark, p0?.remark].filter(Boolean).join(" · ") : "";
+              return (
               <tr key={o.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: o.status==="BLOCKED"?`3px dashed ${C.gold}`:"3px solid transparent"}}>
                 <td>{o.customer}</td>
-                <td style={{fontFamily:FONT_MONO,fontSize:12,fontWeight:600}}>{variantMap[o.items[0].variantId]?.shortCode||"—"}</td>
+                <td>
+                  <div style={{fontFamily:FONT_MONO,fontSize:12,fontWeight:600}}>{v0?.shortCode||"—"}</div>
+                  {remarkText && <div style={{ color:C.rust, fontSize:11, marginTop:2 }}><i className="ti ti-alert-triangle" style={{verticalAlign:-2,marginRight:3}}></i>{remarkText}</div>}
+                </td>
                 <td style={{textAlign:"right"}}>{o.items[0].qty}</td>
                 <td>{o.date}</td>
                 <td><Badge tone={toneFor(o.status)}>{o.status}</Badge></td>
@@ -1598,7 +1662,8 @@ function Orders({ variants, variantMap, productMap, orders, setOrders, stock, se
                   </>}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1805,6 +1870,14 @@ ReactDOM.createRoot(document.getElementById("root")).render(
     <Root />
   </ErrorBoundary>
 );
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("service-worker.js").catch((err) => {
+      console.error("Service worker registration failed:", err);
+    });
+  });
+}
 </script>
 </body>
 </html>

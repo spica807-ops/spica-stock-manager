@@ -160,19 +160,33 @@ function makeShortCode(product, existingVariants) {
 
 /* ---------- Firestore helpers (shared live data, one doc per collection) ---------- */
 const DOC = (name) => db.collection("spica_stock").doc(name);
+// Shared, lightweight way for any part of the app to report a sync problem —
+// the OfflineBanner-adjacent SyncErrorBanner listens for this.
+function reportSyncError(message) {
+  window.dispatchEvent(new CustomEvent("spica-sync-error", { detail: message }));
+}
 function useSyncedDoc(name, fallback) {
   const [value, setValue] = useState(fallback);
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    const unsub = DOC(name).onSnapshot((snap) => {
-      setValue(snap.exists ? snap.data().payload : fallback);
-      setReady(true);
-    });
+    const unsub = DOC(name).onSnapshot(
+      (snap) => {
+        setValue(snap.exists ? snap.data().payload : fallback);
+        setReady(true);
+      },
+      (err) => {
+        console.error(`Failed to load "${name}":`, err);
+        reportSyncError(`Couldn't load ${name} — check your connection and refresh.`);
+      }
+    );
     return unsub;
   }, [name]);
   const save = useCallback((next) => {
     setValue(next);
-    DOC(name).set({ payload: next });
+    DOC(name).set({ payload: next }).catch((err) => {
+      console.error(`Failed to save "${name}":`, err);
+      reportSyncError(`Couldn't save your last change to ${name} — check your connection.`);
+    });
   }, [name]);
   return [value, save, ready];
 }
@@ -182,21 +196,24 @@ function useUsers() {
   const [users, setUsers] = useState({});
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    const unsub = db.collection("users").onSnapshot(async (snap) => {
-      if (snap.empty) {
-        // first ever run — seed the 3 known accounts so login keeps working
-        const batch = db.batch();
-        Object.entries(SEED_ROLE_MAP).forEach(([username, role]) => {
-          batch.set(db.collection("users").doc(username), { role });
-        });
-        await batch.commit();
-        return;
-      }
-      const map = {};
-      snap.forEach((d) => { map[d.id] = d.data().role; });
-      setUsers(map);
-      setReady(true);
-    });
+    const unsub = db.collection("users").onSnapshot(
+      async (snap) => {
+        if (snap.empty) {
+          // first ever run — seed the 3 known accounts so login keeps working
+          const batch = db.batch();
+          Object.entries(SEED_ROLE_MAP).forEach(([username, role]) => {
+            batch.set(db.collection("users").doc(username), { role });
+          });
+          try { await batch.commit(); } catch (err) { console.error("Failed to seed users:", err); reportSyncError("Couldn't set up default accounts — check your connection."); }
+          return;
+        }
+        const map = {};
+        snap.forEach((d) => { map[d.id] = d.data().role; });
+        setUsers(map);
+        setReady(true);
+      },
+      (err) => { console.error("Failed to load users:", err); reportSyncError("Couldn't load user list — check your connection."); }
+    );
     return unsub;
   }, []);
   return [users, ready];
@@ -211,6 +228,26 @@ function Badge({ tone, children }) {
 function Field({ label, children }) {
   return <label style={{ display:"flex", flexDirection:"column", gap:4 }}><span className="label">{label}</span>{children}</label>;
 }
+function PencilIcon({ size=15 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ verticalAlign:-3 }}>
+      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+      <path d="M15 5l4 4" />
+    </svg>
+  );
+}
+function TrashIcon({ size=15 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ verticalAlign:-3 }}>
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
+}
+
 function Btn({ children, onClick, variant="ghost", disabled, style }) {
   const variants = {
     primary:{background:C.teal,color:"#fff",borderColor:C.teal},
@@ -851,7 +888,7 @@ function Mockup({ products, variants, variantMap, productMap, samples, setSample
                         <Btn variant="primary" onClick={()=>setStatus(s.id,"ordered")} style={{marginRight:6}}>Liked it — Order</Btn>
                       </>
                     )}
-                    {perms.canDelete && <Btn variant="danger" onClick={()=>removeSample(s.id)}><i className="ti ti-trash" style={{verticalAlign:-2}}></i></Btn>}
+                    {perms.canDelete && <Btn variant="danger" onClick={()=>removeSample(s.id)}><TrashIcon /></Btn>}
                   </td>
                 </tr>
               );
@@ -870,15 +907,32 @@ function Products({ products, setProducts, variants, setVariants, stock, setStoc
   const [q, setQ] = useState("");
   const [importMsg, setImportMsg] = useState("");
   const [selected, setSelected] = useState(() => new Set());
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
   const fileInputRef = useRef(null);
   const add = () => {
     if (!perms.canEditCatalogue || !name.trim() || !code.trim()) return;
     setProducts([...products, { id:uid(), name:name.trim(), code:code.trim().toUpperCase(), category, remark:remark.trim() }]);
     setName(""); setCode(""); setRemark("");
   };
-  const updateRemark = (id, val) => {
-    if (!perms.canEditCatalogue) return;
-    setProducts(products.map(p => p.id===id ? { ...p, remark: val } : p));
+  const canEditRow = perms.isAdmin || perms.canEditVariants; // admin: full edit, warehouse: remark only
+  const startEdit = (p) => {
+    if (!canEditRow) return;
+    setEditingId(p.id);
+    setEditForm({ name:p.name, code:p.code, category:p.category||"Other", remark:p.remark||"" });
+  };
+  const cancelEdit = () => { setEditingId(null); setEditForm({}); };
+  const saveEdit = (id) => {
+    if (!window.confirm("Save changes to this product?")) return;
+    setProducts(products.map(p => {
+      if (p.id !== id) return p;
+      if (perms.isAdmin) {
+        return { ...p, name:(editForm.name||"").trim()||p.name, code:(editForm.code||"").trim().toUpperCase()||p.code, category:editForm.category||p.category, remark:(editForm.remark||"").trim() };
+      }
+      // warehouse: remark only, everything else stays untouched
+      return { ...p, remark:(editForm.remark||"").trim() };
+    }));
+    setEditingId(null); setEditForm({});
   };
   const remove = (id) => { if (!perms.canDelete) return; if (!window.confirm("Delete this product? Its variants and stock history will stay, but the product itself will be removed.")) return; setProducts(products.filter(x=>x.id!==id)); };
   const toggleSelect = (id) => setSelected(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
@@ -1040,14 +1094,17 @@ function Products({ products, setProducts, variants, setVariants, stock, setStoc
           {importMsg && <div style={{ fontSize:12, color:C.tealDeep, marginTop:10 }}>{importMsg}</div>}
         </div>
       )}
-      {!perms.canEditCatalogue && !perms.readOnly && (
+      {!perms.canEditCatalogue && perms.canEditVariants && (
+        <div style={{ fontSize:12, color:C.sub, marginBottom:14 }}>Only admin can add, remove, or change product details. You can edit the Remark column using the pencil icon.</div>
+      )}
+      {perms.readOnly && (
         <div style={{ fontSize:12, color:C.sub, marginBottom:14 }}>Only admin can add or remove products. You can still view the catalogue.</div>
       )}
       <div className="card">
         {perms.canDelete && selected.size>0 && (
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 14px", background:C.rustSoft, borderBottom:`1px solid ${C.line}` }}>
             <span style={{ fontSize:12, color:C.tealDeep, fontWeight:600 }}>{selected.size} selected</span>
-            <Btn variant="danger" onClick={bulkRemove}><i className="ti ti-trash" style={{verticalAlign:-2,marginRight:4}}></i>Delete selected</Btn>
+            <Btn variant="danger" onClick={bulkRemove}><span style={{marginRight:6}}><TrashIcon /></span>Delete selected</Btn>
           </div>
         )}
         <table>
@@ -1056,22 +1113,40 @@ function Products({ products, setProducts, variants, setVariants, stock, setStoc
             <th>Product</th><th>Code</th><th>Category</th><th>Variants</th><th>Remark</th><th></th></tr></thead>
           <tbody>
             {filtered.length===0 && <tr><td colSpan={perms.canDelete?7:6} style={{padding:18,color:C.sub,textAlign:"center"}}>{products.length===0 ? "No products yet." : "No products match your search."}</td></tr>}
-            {filtered.map(p => (
-              <tr key={p.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: p.remark?`3px dashed ${C.rust}`:"3px solid transparent"}}>
+            {filtered.map(p => {
+              const editing = editingId === p.id;
+              return (
+              <tr key={p.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: p.remark?`3px dashed ${C.rust}`:"3px solid transparent", background: editing?C.tealSoft:"transparent"}}>
                 {perms.canDelete && <td><input type="checkbox" checked={selected.has(p.id)} onChange={()=>toggleSelect(p.id)} /></td>}
-                <td>{p.name}</td><td style={{fontFamily:FONT_MONO}}>{p.code}</td>
-                <td><Badge tone="teal">{p.category||"Other"}</Badge></td>
+                <td>{editing && perms.isAdmin ? <input style={{width:150,fontSize:12}} value={editForm.name} onChange={e=>setEditForm({...editForm,name:e.target.value})} /> : p.name}</td>
+                <td style={{fontFamily:FONT_MONO}}>{editing && perms.isAdmin ? <input style={{width:100,fontSize:12}} value={editForm.code} onChange={e=>setEditForm({...editForm,code:e.target.value})} /> : p.code}</td>
+                <td>
+                  {editing && perms.isAdmin ? (
+                    <select style={{width:110,fontSize:12}} value={editForm.category} onChange={e=>setEditForm({...editForm,category:e.target.value})}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select>
+                  ) : <Badge tone="teal">{p.category||"Other"}</Badge>}
+                </td>
                 <td>{variants.filter(v=>v.productId===p.id).length}</td>
                 <td>
-                  {perms.canEditCatalogue ? (
-                    <input key={p.remark||""} defaultValue={p.remark||""} onBlur={e=>{ if (e.target.value !== (p.remark||"")) updateRemark(p.id, e.target.value); }} placeholder="e.g. 2 units damaged" style={{width:160, fontSize:12, color: p.remark?C.rust:C.sub}} />
+                  {editing ? (
+                    <input style={{width:160, fontSize:12}} value={editForm.remark} onChange={e=>setEditForm({...editForm,remark:e.target.value})} placeholder="e.g. 2 units damaged" autoFocus={!perms.isAdmin} />
                   ) : (p.remark ? <span style={{fontSize:12,color:C.rust}}>{p.remark}</span> : "—")}
                 </td>
-                <td style={{textAlign:"right"}}>
-                  {perms.canDelete && <Btn variant="danger" onClick={()=>remove(p.id)}><i className="ti ti-trash" style={{verticalAlign:-2}}></i></Btn>}
+                <td style={{textAlign:"right", whiteSpace:"nowrap"}}>
+                  {editing ? (
+                    <>
+                      <Btn variant="primary" onClick={()=>saveEdit(p.id)} style={{marginRight:6}}><i className="ti ti-check" style={{verticalAlign:-2}}></i></Btn>
+                      <Btn variant="ghost" onClick={cancelEdit}><i className="ti ti-x" style={{verticalAlign:-2}}></i></Btn>
+                    </>
+                  ) : (
+                    <>
+                      {canEditRow && <Btn variant="gold" onClick={()=>startEdit(p)} style={{marginRight:6}}><PencilIcon /></Btn>}
+                      {perms.canDelete && <Btn variant="danger" onClick={()=>remove(p.id)}><TrashIcon /></Btn>}
+                    </>
+                  )}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1086,6 +1161,8 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
   const [remark, setRemark] = useState("");
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState(() => new Set());
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
   const selectedProduct = products.find(p=>p.id===productId);
   const isChair = selectedProduct?.category === "Chair";
 
@@ -1098,9 +1175,23 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
     setStock({ ...stock, [v.id]: { opening:Number(opening)||0, in:0, out:0, blocked:0 } });
     setColorCode(""); setSeatColor(""); setHeadrest("No"); setSize(""); setOpening(0); setRemark("");
   };
-  const updateRemark = (id, val) => {
+  const startEdit = (v, chair) => {
     if (!perms.canEditVariants) return;
-    setVariants(variants.map(v => v.id===id ? { ...v, remark: val } : v));
+    setEditingId(v.id);
+    setEditForm({ colorCode:v.colorCode||"", seatColor:v.seatColor||"", headrest:v.headrest||"No", size:v.size||"", remark:v.remark||"", chair });
+  };
+  const cancelEdit = () => { setEditingId(null); setEditForm({}); };
+  const saveEdit = (id) => {
+    if (!window.confirm("Save changes to this variant?")) return;
+    setVariants(variants.map(v => {
+      if (v.id !== id) return v;
+      if (perms.isAdmin) {
+        return { ...v, colorCode:(editForm.colorCode||"").trim()||v.colorCode, seatColor: editForm.chair?(editForm.seatColor||"").trim():v.seatColor, headrest: editForm.chair?editForm.headrest:v.headrest, size:(editForm.size||"").trim(), remark:(editForm.remark||"").trim() };
+      }
+      // warehouse: remark only, everything else stays untouched
+      return { ...v, remark:(editForm.remark||"").trim() };
+    }));
+    setEditingId(null); setEditForm({});
   };
   const remove = (id) => { if (!perms.canDelete) return; if (!window.confirm("Delete this variant? Its stock history will stay, but the variant itself will be removed.")) return; setVariants(variants.filter(v=>v.id!==id)); };
   const toggleSelect = (id) => setSelected(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
@@ -1147,7 +1238,7 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
             {perms.canDelete && selected.size>0 && (
               <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 14px", background:C.rustSoft, borderBottom:`1px solid ${C.line}` }}>
                 <span style={{ fontSize:12, color:C.tealDeep, fontWeight:600 }}>{selected.size} selected</span>
-                <Btn variant="danger" onClick={bulkRemove}><i className="ti ti-trash" style={{verticalAlign:-2,marginRight:4}}></i>Delete selected</Btn>
+                <Btn variant="danger" onClick={bulkRemove}><span style={{marginRight:6}}><TrashIcon /></span>Delete selected</Btn>
               </div>
             )}
             <table>
@@ -1158,24 +1249,41 @@ function Variants({ products, variants, setVariants, stock, setStock, perms }) {
                 {filtered.length===0 && <tr><td colSpan={perms.canDelete?10:9} style={{padding:18,color:C.sub,textAlign:"center"}}>{variants.length===0 ? "No variants yet." : "No variants match your search."}</td></tr>}
                 {filtered.map(v => {
                   const p = products.find(x=>x.id===v.productId); const chair = p?.category==="Chair";
+                  const editing = editingId === v.id;
                   return (
-                    <tr key={v.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: v.remark?`3px dashed ${C.rust}`:"3px solid transparent"}}>
+                    <tr key={v.id} style={{borderTop:`1px solid ${C.line}`, borderLeft: v.remark?`3px dashed ${C.rust}`:"3px solid transparent", background: editing?C.tealSoft:"transparent"}}>
                       {perms.canDelete && <td><input type="checkbox" checked={selected.has(v.id)} onChange={()=>toggleSelect(v.id)} /></td>}
                       <td>
                         <div style={{fontFamily:FONT_MONO,fontSize:13,fontWeight:600,color:C.tealDeep}}>{v.shortCode||"—"}</div>
                       </td>
                       <td>{p?.name||"—"}</td>
                       <td><Badge tone="teal">{p?.category||"Other"}</Badge></td>
-                      <td>{v.colorCode}</td>
-                      <td>{chair?(v.seatColor||"—"):"—"}</td>
-                      <td>{chair?(v.headrest==="Yes"?<Badge tone="gold">Yes</Badge>:"No"):"—"}</td>
-                      <td>{v.size||"—"}</td>
+                      <td>{editing && perms.isAdmin ? <input style={{width:110,fontSize:12}} value={editForm.colorCode} onChange={e=>setEditForm({...editForm,colorCode:e.target.value})} /> : v.colorCode}</td>
+                      <td>{editing && perms.isAdmin && chair ? <input style={{width:90,fontSize:12}} value={editForm.seatColor} onChange={e=>setEditForm({...editForm,seatColor:e.target.value})} /> : (chair?(v.seatColor||"—"):"—")}</td>
                       <td>
-                        {perms.canEditVariants ? (
-                          <input key={v.remark||""} defaultValue={v.remark||""} onBlur={e=>{ if (e.target.value !== (v.remark||"")) updateRemark(v.id, e.target.value); }} placeholder="e.g. 2 units damaged" style={{width:150, fontSize:12, color: v.remark?C.rust:C.sub}} />
+                        {editing && perms.isAdmin && chair ? (
+                          <select style={{width:80,fontSize:12}} value={editForm.headrest} onChange={e=>setEditForm({...editForm,headrest:e.target.value})}><option>No</option><option>Yes</option></select>
+                        ) : (chair?(v.headrest==="Yes"?<Badge tone="gold">Yes</Badge>:"No"):"—")}
+                      </td>
+                      <td>{editing && perms.isAdmin ? <input style={{width:80,fontSize:12}} value={editForm.size} onChange={e=>setEditForm({...editForm,size:e.target.value})} /> : (v.size||"—")}</td>
+                      <td>
+                        {editing ? (
+                          <input style={{width:150, fontSize:12}} value={editForm.remark} onChange={e=>setEditForm({...editForm,remark:e.target.value})} placeholder="e.g. 2 units damaged" autoFocus={!perms.isAdmin} />
                         ) : (v.remark ? <span style={{fontSize:12,color:C.rust}}>{v.remark}</span> : "—")}
                       </td>
-                      <td style={{textAlign:"right"}}>{perms.canDelete && <Btn variant="danger" onClick={()=>remove(v.id)}><i className="ti ti-trash" style={{verticalAlign:-2}}></i></Btn>}</td>
+                      <td style={{textAlign:"right", whiteSpace:"nowrap"}}>
+                        {editing ? (
+                          <>
+                            <Btn variant="primary" onClick={()=>saveEdit(v.id)} style={{marginRight:6}}><i className="ti ti-check" style={{verticalAlign:-2}}></i></Btn>
+                            <Btn variant="ghost" onClick={cancelEdit}><i className="ti ti-x" style={{verticalAlign:-2}}></i></Btn>
+                          </>
+                        ) : (
+                          <>
+                            {perms.canEditVariants && <Btn variant="gold" onClick={()=>startEdit(v, chair)} style={{marginRight:6}}><PencilIcon /></Btn>}
+                            {perms.canDelete && <Btn variant="danger" onClick={()=>remove(v.id)}><TrashIcon /></Btn>}
+                          </>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
@@ -1584,14 +1692,77 @@ function Users({ users }) {
 
 /* ---------- Root: auth gate ---------- */
 async function ensureSeeded() {
-  const snap = await db.collection("users").get();
-  if (snap.empty) {
-    const batch = db.batch();
-    Object.entries(SEED_ROLE_MAP).forEach(([username, role]) => {
-      batch.set(db.collection("users").doc(username), { role });
-    });
-    await batch.commit();
+  try {
+    const snap = await db.collection("users").get();
+    if (snap.empty) {
+      const batch = db.batch();
+      Object.entries(SEED_ROLE_MAP).forEach(([username, role]) => {
+        batch.set(db.collection("users").doc(username), { role });
+      });
+      await batch.commit();
+    }
+  } catch (err) {
+    console.error("Failed to check/seed users:", err);
+    reportSyncError("Couldn't reach the database — check your connection.");
   }
+}
+
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Spica Stock Manager crashed:", error, info); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"#FAF7F0", padding:24 }}>
+          <div className="card" style={{ maxWidth:420, padding:28, textAlign:"center" }}>
+            <div style={{ fontSize:32, marginBottom:10 }}>⚠️</div>
+            <div style={{ fontFamily:FONT_DISPLAY, fontSize:18, fontWeight:600, color:C.tealDeep, marginBottom:8 }}>Something went wrong</div>
+            <div style={{ fontSize:13, color:C.sub, marginBottom:18 }}>The app hit an unexpected error. Your data is safe in the database — reloading usually fixes this.</div>
+            <Btn variant="primary" onClick={()=>window.location.reload()}>Reload app</Btn>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function OfflineBanner() {
+  const [online, setOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const goOnline = () => setOnline(true);
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); };
+  }, []);
+  if (online) return null;
+  return (
+    <div style={{ background:"#8B1E12", color:"#fff", textAlign:"center", padding:"8px 14px", fontSize:12, fontWeight:600, position:"sticky", top:0, zIndex:200 }}>
+      <i className="ti ti-wifi-off" style={{ verticalAlign:-2, marginRight:6 }}></i>
+      No internet connection — changes won't be saved until you're back online.
+    </div>
+  );
+}
+
+function SyncErrorBanner() {
+  const [msg, setMsg] = useState(null);
+  useEffect(() => {
+    const handler = (e) => {
+      setMsg(e.detail);
+      clearTimeout(handler._t);
+      handler._t = setTimeout(() => setMsg(null), 8000);
+    };
+    window.addEventListener("spica-sync-error", handler);
+    return () => window.removeEventListener("spica-sync-error", handler);
+  }, []);
+  if (!msg) return null;
+  return (
+    <div style={{ background:C.gold, color:"#3B2E08", textAlign:"center", padding:"8px 14px", fontSize:12, fontWeight:600, position:"sticky", top:0, zIndex:199 }}>
+      <i className="ti ti-alert-triangle" style={{ verticalAlign:-2, marginRight:6 }}></i>{msg}
+    </div>
+  );
 }
 
 function Root() {
@@ -1627,7 +1798,13 @@ function Root() {
   return <App username={username} role={role} />;
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <ErrorBoundary>
+    <OfflineBanner />
+    <SyncErrorBanner />
+    <Root />
+  </ErrorBoundary>
+);
 </script>
 </body>
 </html>

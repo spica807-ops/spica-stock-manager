@@ -2,7 +2,7 @@
 // keep the app shell (this HTML file + icons) available if the network
 // briefly drops. It does NOT cache Firebase/Firestore requests, so stock
 // data always stays live and never goes stale from a cache.
-const CACHE_NAME = "spica-stock-shell-v1";
+const CACHE_NAME = "spica-stock-shell-v2";
 const SHELL_FILES = [
   "./index.html",
   "./manifest.json",

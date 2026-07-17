@@ -456,8 +456,10 @@ function App({ username, role }) {
   const [orders, setOrders, ordersReady] = useSyncedDoc("orders", []);
   const [movements, setMovements, movementsReady] = useSyncedDoc("movements", []);
   const [samples, setSamples, samplesReady] = useSyncedDoc("samples", []);
+  const [serviceProducts, setServiceProducts, serviceProductsReady] = useSyncedDoc("serviceProducts", []);
+  const [serviceEntries, setServiceEntries, serviceEntriesReady] = useSyncedDoc("serviceEntries", []);
   const [users, usersReady] = useUsers();
-  const ready = productsReady && variantsReady && stockReady && ordersReady && movementsReady && samplesReady;
+  const ready = productsReady && variantsReady && stockReady && ordersReady && movementsReady && samplesReady && serviceProductsReady && serviceEntriesReady;
 
   const perms = {
     isAdmin: role === "admin",
@@ -465,6 +467,7 @@ function App({ username, role }) {
     canEditVariants: role === "admin" || role === "warehouse",
     canEditStock: role === "admin" || role === "warehouse",
     canManageOrders: role === "admin" || role === "warehouse",
+    canEditService: role === "admin" || role === "warehouse",
     canDelete: role === "admin",
     canManageUsers: role === "admin",
     readOnly: role === "sales",
@@ -506,6 +509,7 @@ function App({ username, role }) {
     { id:"stock", label:"Stock ledger", icon:"ti-clipboard-list" },
     { id:"orders", label:"Orders & blocking", icon:"ti-lock" },
     { id:"reports", label:"Daily reports", icon:"ti-calendar-stats" },
+    { id:"service", label:"Service & Replacement", icon:"ti-tools" },
     { id:"mockup", label:"Mockup", icon:"ti-photo" },
   ];
   if (perms.canManageUsers) tabs.push({ id:"users", label:"Users", icon:"ti-users" });
@@ -559,8 +563,9 @@ function App({ username, role }) {
           {tab==="stock" && <StockLedger products={products} variants={variants} productMap={productMap} getStock={getStock} available={available} setOpening={setOpening} logMovement={logMovement} perms={perms} />}
           {tab==="orders" && <Orders variants={variants} variantMap={variantMap} productMap={productMap} orders={orders} setOrders={setOrders} stock={stock} setStock={setStock} available={available} perms={perms} />}
           {tab==="reports" && <Reports movements={movements} variantMap={variantMap} productMap={productMap} products={products} />}
+          {tab==="service" && <ServiceReplacement serviceProducts={serviceProducts} setServiceProducts={setServiceProducts} serviceEntries={serviceEntries} setServiceEntries={setServiceEntries} perms={perms} username={username} />}
           {tab==="mockup" && <Mockup products={products} variants={variants} variantMap={variantMap} productMap={productMap} samples={samples} setSamples={setSamples} perms={perms} setTab={setTab} />}
-          {tab==="users" && perms.canManageUsers && <Users users={users} />}
+          {tab==="users" && perms.canManageUsers && <Users users={users} products={products} setProducts={setProducts} variants={variants} setVariants={setVariants} stock={stock} setStock={setStock} orders={orders} setOrders={setOrders} movements={movements} setMovements={setMovements} samples={samples} setSamples={setSamples} serviceProducts={serviceProducts} setServiceProducts={setServiceProducts} serviceEntries={serviceEntries} setServiceEntries={setServiceEntries} />}
         </div>
       </div>
     </div>
@@ -1332,6 +1337,7 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
   const [moveQty, setMoveQty] = useState(1);
   const [moveDate, setMoveDate] = useState(today());
   const [moveNote, setMoveNote] = useState("");
+  const [moveError, setMoveError] = useState("");
 
   const list = variants.filter(v => {
     if (filterProduct && v.productId !== filterProduct) return false;
@@ -1341,6 +1347,11 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
   });
 
   const submitMove = () => {
+    if (!moveNote.trim()) {
+      setMoveError("PO number or DC number is required.");
+      return;
+    }
+    setMoveError("");
     logMovement(moveVariant, moveType, moveQty, moveDate, moveNote);
     setMoveVariant(""); setMoveProduct(""); setMoveQty(1); setMoveNote("");
   };
@@ -1396,9 +1407,17 @@ function StockLedger({ products, variants, productMap, getStock, available, setO
             </Field>
             <Field label="Quantity"><input type="number" min="1" style={{width:90}} value={moveQty} onChange={e=>setMoveQty(e.target.value)} /></Field>
             <Field label="Date"><input type="date" style={{width:150}} value={moveDate} onChange={e=>setMoveDate(e.target.value)} /></Field>
-            <Field label="Note (optional)"><input style={{width:180}} value={moveNote} onChange={e=>setMoveNote(e.target.value)} placeholder="PO number, vendor…" /></Field>
+            <Field label="PO / DC number">
+              <input
+                style={{width:180, borderColor: moveError ? C.rust : C.line}}
+                value={moveNote}
+                onChange={e=>{ setMoveNote(e.target.value); if (moveError) setMoveError(""); }}
+                placeholder="PO number or DC number"
+              />
+            </Field>
             <Btn variant="primary" onClick={submitMove}><i className="ti ti-plus" style={{verticalAlign:-2,marginRight:4}}></i>Log movement</Btn>
           </div>
+          {moveError && <div style={{ fontSize:12, color:C.rust, marginTop:8 }}>{moveError}</div>}
         </div>
       )}
 
@@ -1573,6 +1592,193 @@ function Reports({ movements, variantMap, productMap, products }) {
   );
 }
 
+/* ---------- Service & Replacement (fully separate mini-inventory, own product
+   list and own running stock — never touches the main Products/Stock ledger) ---------- */
+function ServiceReplacement({ serviceProducts, setServiceProducts, serviceEntries, setServiceEntries, perms, username }) {
+  const [q, setQ] = useState("");
+  const [filterProduct, setFilterProduct] = useState("");
+
+  // entry form state
+  const [entryProductId, setEntryProductId] = useState("");
+  const [newProductName, setNewProductName] = useState("");
+  const [entryType, setEntryType] = useState("in");
+  const [entryQty, setEntryQty] = useState(1);
+  const [entryDate, setEntryDate] = useState(today());
+  const [entryCustomer, setEntryCustomer] = useState("");
+  const [entryDc, setEntryDc] = useState("");
+  const [entryNote, setEntryNote] = useState("");
+  const [entryError, setEntryError] = useState("");
+
+  const productMap = useMemo(() => Object.fromEntries(serviceProducts.map(p => [p.id, p])), [serviceProducts]);
+
+  const stockFor = useCallback((productId) => {
+    return serviceEntries.reduce((s, e) => {
+      if (e.productId !== productId) return s;
+      return s + (e.type === "in" ? e.qty : -e.qty);
+    }, 0);
+  }, [serviceEntries]);
+
+  const totalAvailable = useMemo(() => serviceProducts.reduce((s, p) => s + stockFor(p.id), 0), [serviceProducts, stockFor]);
+
+  const submitEntry = () => {
+    setEntryError("");
+    let productId = entryProductId;
+
+    // allow creating a brand-new service product inline
+    if (!productId && newProductName.trim()) {
+      const existing = serviceProducts.find(p => p.name.trim().toLowerCase() === newProductName.trim().toLowerCase());
+      if (existing) {
+        productId = existing.id;
+      } else {
+        const newProduct = { id: uid(), name: newProductName.trim() };
+        setServiceProducts([newProduct, ...serviceProducts]);
+        productId = newProduct.id;
+      }
+    }
+
+    if (!productId) { setEntryError("Pick a product or type a new product name."); return; }
+    if (!entryDc.trim()) { setEntryError("DC number is required."); return; }
+    const qn = Number(entryQty);
+    if (!qn || qn <= 0) { setEntryError("Enter a valid quantity."); return; }
+    if (entryType === "out" && stockFor(productId) < qn) { setEntryError("Not enough available stock for this outward entry."); return; }
+
+    const entry = {
+      id: uid(), productId, type: entryType, qty: qn, date: entryDate || today(),
+      customer: entryCustomer.trim(), dc: entryDc.trim(), note: entryNote.trim(),
+      loggedBy: username, ts: Date.now(),
+    };
+    setServiceEntries([entry, ...serviceEntries]);
+    setEntryProductId(""); setNewProductName(""); setEntryQty(1); setEntryCustomer(""); setEntryDc(""); setEntryNote("");
+  };
+
+  const removeEntry = (id) => {
+    if (!perms.canEditService) return;
+    setServiceEntries(serviceEntries.filter(e => e.id !== id));
+  };
+
+  const filtered = serviceEntries.filter(e => {
+    if (filterProduct && e.productId !== filterProduct) return false;
+    const s = q.trim().toLowerCase();
+    if (!s) return true;
+    const hay = `${productMap[e.productId]?.name||""} ${e.customer||""} ${e.dc||""} ${e.note||""}`.toLowerCase();
+    return hay.includes(s);
+  });
+
+  const exportEntries = () => {
+    const rows = filtered.map(e => ({
+      Date: e.date,
+      Product: productMap[e.productId]?.name || "",
+      Type: e.type === "in" ? "Inward" : "Outward",
+      Quantity: e.qty,
+      Customer: e.customer || "",
+      "DC number": e.dc || "",
+      Note: e.note || "",
+      LoggedBy: e.loggedBy || "",
+    }));
+    exportCsv(`service-replacement-${today()}.csv`, rows);
+  };
+
+  return (
+    <div>
+      <SectionHeader
+        eyebrow="Separate inventory"
+        title="Service & Replacement"
+        action={
+          <div style={{ display:"flex", gap:10 }}>
+            <SearchBox value={q} onChange={setQ} placeholder="Search product, customer, DC…" />
+            <select style={{width:170}} value={filterProduct} onChange={e=>setFilterProduct(e.target.value)}>
+              <option value="">All products</option>
+              {serviceProducts.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <Btn variant="ghost" onClick={exportEntries}><i className="ti ti-download" style={{verticalAlign:-2,marginRight:4}}></i>Export CSV</Btn>
+          </div>
+        }
+      />
+
+      <div style={{ fontSize:12, color:C.sub, marginBottom:16 }}>
+        This is a standalone module for service and replacement parts — its products and stock are kept completely separate from the main Products / Stock ledger.
+      </div>
+
+      <div style={{ display:"flex", gap:14, marginBottom:20 }}>
+        <StatCard label="Products tracked" value={serviceProducts.length} tone="teal" />
+        <StatCard label="Total available" value={totalAvailable} tone="green" />
+      </div>
+
+      {perms.canEditService && (
+        <div className="card" style={{ padding:16, marginBottom:20, overflow:"visible" }}>
+          <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>Log inward / outward</div>
+          <div style={{ display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap" }}>
+            <Field label="Product">
+              <select style={{width:180}} value={entryProductId} onChange={e=>{ setEntryProductId(e.target.value); setNewProductName(""); }}>
+                <option value="">— pick existing —</option>
+                {serviceProducts.map(p=><option key={p.id} value={p.id}>{p.name} ({stockFor(p.id)} avail)</option>)}
+              </select>
+            </Field>
+            <Field label="Or new product">
+              <input
+                style={{width:160}}
+                value={newProductName}
+                onChange={e=>{ setNewProductName(e.target.value); if (e.target.value) setEntryProductId(""); }}
+                placeholder="Type a new product…"
+              />
+            </Field>
+            <Field label="Type">
+              <select style={{width:100}} value={entryType} onChange={e=>setEntryType(e.target.value)}>
+                <option value="in">Inward</option><option value="out">Outward</option>
+              </select>
+            </Field>
+            <Field label="Quantity"><input type="number" min="1" style={{width:90}} value={entryQty} onChange={e=>setEntryQty(e.target.value)} /></Field>
+            <Field label="Date"><input type="date" style={{width:150}} value={entryDate} onChange={e=>setEntryDate(e.target.value)} /></Field>
+            <Field label="Customer name (optional)"><input style={{width:160}} value={entryCustomer} onChange={e=>setEntryCustomer(e.target.value)} placeholder="Customer name" /></Field>
+            <Field label="DC number">
+              <input
+                style={{width:150, borderColor: entryError && !entryDc.trim() ? C.rust : C.line}}
+                value={entryDc}
+                onChange={e=>{ setEntryDc(e.target.value); if (entryError) setEntryError(""); }}
+                placeholder="DC number"
+              />
+            </Field>
+            <Field label="Note (optional)"><input style={{width:160}} value={entryNote} onChange={e=>setEntryNote(e.target.value)} placeholder="Note…" /></Field>
+            <Btn variant="primary" onClick={submitEntry}><i className="ti ti-plus" style={{verticalAlign:-2,marginRight:4}}></i>Log entry</Btn>
+          </div>
+          {entryError && <div style={{ fontSize:12, color:C.rust, marginTop:8 }}>{entryError}</div>}
+        </div>
+      )}
+
+      <div className="card">
+        <table>
+          <thead>
+            <tr style={{background:C.tealSoft}}>
+              <th>Date</th><th>Product</th><th>Type</th><th style={{textAlign:"right"}}>Qty</th>
+              <th>Customer</th><th>DC number</th><th>Note</th><th>Logged by</th>{perms.canEditService && <th></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length===0 && <tr><td colSpan={perms.canEditService?9:8} style={{padding:18,color:C.sub,textAlign:"center"}}>No entries yet.</td></tr>}
+            {filtered.map(e => (
+              <tr key={e.id} style={{borderTop:`1px solid ${C.line}`}}>
+                <td style={{color:C.sub}}>{e.date}</td>
+                <td>{productMap[e.productId]?.name || "—"}</td>
+                <td>{e.type==="in" ? <Badge tone="green">Inward</Badge> : <Badge tone="rust">Outward</Badge>}</td>
+                <td style={{textAlign:"right",fontFamily:FONT_MONO}}>{e.qty}</td>
+                <td>{e.customer || "—"}</td>
+                <td style={{fontFamily:FONT_MONO,fontSize:12}}>{e.dc || "—"}</td>
+                <td style={{color:C.sub}}>{e.note || "—"}</td>
+                <td style={{color:C.sub}}>{e.loggedBy}</td>
+                {perms.canEditService && (
+                  <td style={{textAlign:"right"}}>
+                    <Btn variant="danger" onClick={()=>removeEntry(e.id)}><TrashIcon /></Btn>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function Orders({ variants, variantMap, productMap, orders, setOrders, stock, setStock, available, perms }) {
   const [customer, setCustomer] = useState(""); const [variantId, setVariantId] = useState("");
   const [qty, setQty] = useState(1); const [error, setError] = useState("");
@@ -1672,12 +1878,15 @@ function Orders({ variants, variantMap, productMap, orders, setOrders, stock, se
   );
 }
 
-function Users({ users }) {
+function Users({ users, products, setProducts, variants, setVariants, stock, setStock, orders, setOrders, movements, setMovements, samples, setSamples, serviceProducts, setServiceProducts, serviceEntries, setServiceEntries }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("sales");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [backupMsg, setBackupMsg] = useState("");
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const fileInputRef = useRef(null);
 
   const addUser = async () => {
     setMsg(""); setBusy(true);
@@ -1714,9 +1923,93 @@ function Users({ users }) {
     await db.collection("users").doc(uname).set({ role: newRole });
   };
 
+  const downloadBackup = () => {
+    const backup = {
+      backupVersion: 1,
+      exportedAt: new Date().toISOString(),
+      products, variants, stock, orders, movements, samples,
+      serviceProducts, serviceEntries,
+      users,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `spica-stock-backup-${today()}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setBackupMsg("Backup downloaded.");
+  };
+
+  const triggerRestore = () => {
+    if (fileInputRef.current) fileInputRef.current.click();
+  };
+
+  const restoreFromFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+
+    setBackupMsg("");
+    let data;
+    try {
+      const text = await file.text();
+      data = JSON.parse(text);
+    } catch (err) {
+      setBackupMsg("Couldn't read that file — make sure it's a valid backup JSON.");
+      return;
+    }
+
+    if (!data || typeof data !== "object" || !("backupVersion" in data)) {
+      setBackupMsg("That file doesn't look like a Spica Stock backup.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `This will REPLACE all current data (products, variants, stock, orders, movements, samples, service data, and user roles) with the backup from ${data.exportedAt ? new Date(data.exportedAt).toLocaleString() : "an unknown date"}.\n\nThis cannot be undone. Are you sure you want to continue?`
+    );
+    if (!confirmed) return;
+
+    setRestoreBusy(true);
+    try {
+      if (Array.isArray(data.products)) setProducts(data.products);
+      if (Array.isArray(data.variants)) setVariants(data.variants);
+      if (data.stock && typeof data.stock === "object") setStock(data.stock);
+      if (Array.isArray(data.orders)) setOrders(data.orders);
+      if (Array.isArray(data.movements)) setMovements(data.movements);
+      if (Array.isArray(data.samples)) setSamples(data.samples);
+      if (Array.isArray(data.serviceProducts)) setServiceProducts(data.serviceProducts);
+      if (Array.isArray(data.serviceEntries)) setServiceEntries(data.serviceEntries);
+
+      if (data.users && typeof data.users === "object") {
+        const batch = db.batch();
+        Object.entries(data.users).forEach(([uname, r]) => {
+          batch.set(db.collection("users").doc(uname), { role: r });
+        });
+        await batch.commit();
+      }
+      setBackupMsg("Restore complete — data has been replaced from the backup.");
+    } catch (err) {
+      console.error("Restore failed:", err);
+      setBackupMsg("Restore failed partway through — check your connection and try again.");
+    }
+    setRestoreBusy(false);
+  };
+
   return (
     <div>
       <SectionHeader eyebrow="Access" title="Users" />
+
+      <div className="card" style={{ padding:16, marginBottom:20 }}>
+        <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:4, textTransform:"uppercase", letterSpacing:"0.04em" }}>Backup &amp; restore</div>
+        <div style={{ fontSize:12, color:C.sub, marginBottom:12 }}>Download a full copy of all data (products, variants, stock, orders, movements, samples, service data, users) as a single file. Keep it somewhere safe in case data is ever lost. Restore replaces all current data with the backup — use carefully.</div>
+        <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+          <Btn variant="primary" onClick={downloadBackup}><i className="ti ti-download" style={{verticalAlign:-2,marginRight:4}}></i>Backup data</Btn>
+          <Btn variant="danger" disabled={restoreBusy} onClick={triggerRestore}><i className="ti ti-upload" style={{verticalAlign:-2,marginRight:4}}></i>{restoreBusy ? "Restoring…" : "Restore from backup"}</Btn>
+          <input ref={fileInputRef} type="file" accept="application/json" style={{ display:"none" }} onChange={restoreFromFile} />
+        </div>
+        {backupMsg && <div style={{ fontSize:12, color: backupMsg.includes("failed") || backupMsg.includes("Couldn't") || backupMsg.includes("doesn't look") ? C.rust : C.green, marginTop:10 }}>{backupMsg}</div>}
+      </div>
+
       <div className="card" style={{ padding:16, marginBottom:20 }}>
         <div style={{ fontSize:12, fontWeight:600, color:C.tealDeep, marginBottom:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>Add a new login</div>
         <div style={{ display:"flex", gap:10, alignItems:"flex-end", flexWrap:"wrap" }}>

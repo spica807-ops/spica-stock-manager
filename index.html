@@ -764,6 +764,7 @@ function App({
     canEditCatalogue: role === "admin",
     canEditVariants: role === "admin" || role === "warehouse",
     canEditStock: role === "admin" || role === "warehouse",
+    canEditOpeningStock: role === "admin",
     canManageOrders: role === "admin" || role === "warehouse",
     canEditService: role === "admin" || role === "warehouse",
     canDelete: role === "admin",
@@ -783,7 +784,7 @@ function App({
     return (s.opening || 0) + (s.in || 0) - (s.out || 0) - (s.blocked || 0);
   }, [getStock]);
   const setOpening = (id, value) => {
-    if (!perms.canEditStock) return;
+    if (!perms.canEditOpeningStock) return;
     setStock({
       ...stock,
       [id]: {
@@ -3276,9 +3277,10 @@ function StockLedger({
       }
     }, /*#__PURE__*/React.createElement("input", {
       type: "number",
-      disabled: !perms.canEditStock,
+      disabled: !perms.canEditOpeningStock,
       defaultValue: s.opening,
       key: `${v.id}-${s.opening}`,
+      title: perms.canEditOpeningStock ? "" : "Opening stock can only be edited by Admin",
       onBlur: e => {
         const next = e.target.value;
         if (Number(next) === Number(s.opening)) return;
@@ -3291,7 +3293,9 @@ function StockLedger({
       style: {
         width: 64,
         textAlign: "right",
-        padding: "5px 6px"
+        padding: "5px 6px",
+        opacity: perms.canEditOpeningStock ? 1 : 0.55,
+        cursor: perms.canEditOpeningStock ? "text" : "not-allowed"
       }
     })), /*#__PURE__*/React.createElement("td", {
       style: {

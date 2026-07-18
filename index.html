@@ -4264,6 +4264,36 @@ function Users({
     URL.revokeObjectURL(url);
     setBackupMsg("Backup downloaded.");
   };
+  const [resetMsg, setResetMsg] = useState("");
+  const clearOrdersAndBlocked = () => {
+    const confirmed = window.confirm(`This will permanently delete ALL ${orders.length} order(s) and reset "blocked" stock back to 0 on every variant.\n\nThis cannot be undone. Continue?`);
+    if (!confirmed) return;
+    setOrders([]);
+    const nextStock = {};
+    Object.entries(stock).forEach(([id, s]) => {
+      nextStock[id] = {
+        ...s,
+        blocked: 0
+      };
+    });
+    setStock(nextStock);
+    setResetMsg("Orders cleared and blocked stock reset to 0.");
+  };
+  const clearDailyReports = () => {
+    const confirmed = window.confirm(`This will permanently delete ALL ${movements.length} logged movement(s) and reset "in" / "out" totals back to 0 on every variant (opening stock stays as-is).\n\nThis cannot be undone. Continue?`);
+    if (!confirmed) return;
+    setMovements([]);
+    const nextStock = {};
+    Object.entries(stock).forEach(([id, s]) => {
+      nextStock[id] = {
+        ...s,
+        in: 0,
+        out: 0
+      };
+    });
+    setStock(nextStock);
+    setResetMsg("Daily report log cleared and In/Out totals reset to 0.");
+  };
   const triggerRestore = () => {
     if (fileInputRef.current) fileInputRef.current.click();
   };
@@ -4377,6 +4407,58 @@ function Users({
       marginTop: 10
     }
   }, backupMsg)), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 16,
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: C.rust,
+      marginBottom: 4,
+      textTransform: "uppercase",
+      letterSpacing: "0.04em"
+    }
+  }, "Fresh launch — clear test data"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.sub,
+      marginBottom: 12
+    }
+  }, "Use this once, right before going live, to wipe out test entries. Take a backup first if unsure. Products, variants, and opening stock are never touched by these — only orders/blocked and the movement log/In-Out totals."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    onClick: clearOrdersAndBlocked
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-trash",
+    style: {
+      verticalAlign: -2,
+      marginRight: 4
+    }
+  }), "Clear Orders & Block"), /*#__PURE__*/React.createElement(Btn, {
+    variant: "danger",
+    onClick: clearDailyReports
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-trash",
+    style: {
+      verticalAlign: -2,
+      marginRight: 4
+    }
+  }), "Clear Daily Reports")), resetMsg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.green,
+      marginTop: 10
+    }
+  }, resetMsg)), /*#__PURE__*/React.createElement("div", {
     className: "card",
     style: {
       padding: 16,

@@ -3997,6 +3997,24 @@ function Orders({
   const [error, setError] = useState("");
   const [orderRemark, setOrderRemark] = useState("");
   const [q, setQ] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editCustomer, setEditCustomer] = useState("");
+  const [editRemark, setEditRemark] = useState("");
+  const startEdit = o => {
+    setEditingId(o.id);
+    setEditCustomer(o.customer || "");
+    setEditRemark(o.remark || "");
+  };
+  const cancelEdit = () => setEditingId(null);
+  const saveEdit = () => {
+    if (!perms.canManageOrders || !editCustomer.trim()) return;
+    setOrders(orders.map(o => o.id === editingId ? {
+      ...o,
+      customer: editCustomer.trim(),
+      remark: editRemark.trim()
+    } : o));
+    setEditingId(null);
+  };
   const createOrder = () => {
     setError("");
     if (!perms.canManageOrders || !customer.trim() || !variantId || !qty) return;
@@ -4209,7 +4227,14 @@ function Orders({
         borderTop: `1px solid ${C.line}`,
         borderLeft: o.status === "BLOCKED" ? `3px dashed ${C.gold}` : "3px solid transparent"
       }
-    }, /*#__PURE__*/React.createElement("td", null, o.customer), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", {
+    }, /*#__PURE__*/React.createElement("td", null, editingId === o.id ? /*#__PURE__*/React.createElement("input", {
+      style: {
+        width: 150
+      },
+      value: editCustomer,
+      onChange: e => setEditCustomer(e.target.value),
+      placeholder: "Customer name"
+    }) : o.customer), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement("div", {
       style: {
         fontFamily: FONT_MONO,
         fontSize: 12,
@@ -4237,22 +4262,44 @@ function Orders({
         fontSize: 12,
         maxWidth: 160
       }
-    }, o.remark || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(Badge, {
+    }, editingId === o.id ? /*#__PURE__*/React.createElement("input", {
+      style: {
+        width: 160
+      },
+      value: editRemark,
+      onChange: e => setEditRemark(e.target.value),
+      placeholder: "Remark…"
+    }) : o.remark || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(Badge, {
       tone: toneFor(o.status)
     }, o.status)), /*#__PURE__*/React.createElement("td", {
       style: {
         textAlign: "right",
         display: "flex",
         gap: 6,
-        justifyContent: "flex-end"
+        justifyContent: "flex-end",
+        flexWrap: "wrap"
       }
-    }, o.status === "BLOCKED" && perms.canManageOrders && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
+    }, editingId === o.id ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
+      variant: "primary",
+      onClick: saveEdit
+    }, "Save"), /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: cancelEdit
+    }, "Cancel")) : /*#__PURE__*/React.createElement(React.Fragment, null, perms.canManageOrders && /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: () => startEdit(o)
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-edit",
+      style: {
+        verticalAlign: -2
+      }
+    })), o.status === "BLOCKED" && perms.canManageOrders && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
       variant: "primary",
       onClick: () => confirmOrder(o)
     }, "Confirm sale"), /*#__PURE__*/React.createElement(Btn, {
       variant: "danger",
       onClick: () => releaseOrder(o)
-    }, "Release"))));
+    }, "Release")))));
   })))));
 }
 function Users({

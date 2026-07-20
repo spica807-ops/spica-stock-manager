@@ -1589,14 +1589,14 @@ function Dashboard({
       fontWeight: 600,
       color: C.tealDeep
     }
-  }, "Today's inward")), /*#__PURE__*/React.createElement(Badge, {
+  }, dayLabel, " inward")), /*#__PURE__*/React.createElement(Badge, {
     tone: "green"
-  }, "Total +", todayIn)), todayInMoves.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Total +", dayIn)), dayInMoves.length === 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: C.sub
     }
-  }, "No inward stock logged today."), todayInMoves.map(m => {
+  }, "No inward stock logged ", isToday ? "today" : "on this date", "."), dayInMoves.map(m => {
     const v = variants.find(x => x.id === m.variantId);
     return /*#__PURE__*/React.createElement("div", {
       key: m.id,
@@ -1672,14 +1672,14 @@ function Dashboard({
       fontWeight: 600,
       color: C.tealDeep
     }
-  }, "Today's outward")), /*#__PURE__*/React.createElement(Badge, {
+  }, dayLabel, " outward")), /*#__PURE__*/React.createElement(Badge, {
     tone: "rust"
-  }, "Total -", todayOut)), todayOutMoves.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Total -", dayOut)), dayOutMoves.length === 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: C.sub
     }
-  }, "No outward stock logged today."), todayOutMoves.map(m => {
+  }, "No outward stock logged ", isToday ? "today" : "on this date", "."), dayOutMoves.map(m => {
     const v = variants.find(x => x.id === m.variantId);
     return /*#__PURE__*/React.createElement("div", {
       key: m.id,

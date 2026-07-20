@@ -1207,11 +1207,17 @@ function Dashboard({
 }) {
   const [q, setQ] = useState("");
   const todayStr = today();
-  const todayMoves = movements.filter(m => m.date === todayStr);
-  const todayInMoves = todayMoves.filter(m => m.type === "in");
-  const todayOutMoves = todayMoves.filter(m => m.type === "out");
-  const todayIn = todayInMoves.reduce((s, m) => s + m.qty, 0);
-  const todayOut = todayOutMoves.reduce((s, m) => s + m.qty, 0);
+  const [reportDate, setReportDate] = useState(todayStr);
+  const dayMoves = movements.filter(m => m.date === reportDate);
+  const dayInMoves = dayMoves.filter(m => m.type === "in");
+  const dayOutMoves = dayMoves.filter(m => m.type === "out");
+  const dayIn = dayInMoves.reduce((s, m) => s + m.qty, 0);
+  const dayOut = dayOutMoves.reduce((s, m) => s + m.qty, 0);
+  const isToday = reportDate === todayStr;
+  const dayLabel = isToday ? "Today's" : new Date(reportDate).toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short"
+  }) + "'s";
   const searchResults = q.trim() ? variants.filter(v => {
     const s = q.trim().toLowerCase();
     const p = productMap[v.productId];
@@ -1248,9 +1254,14 @@ function Dashboard({
     }
   }), /*#__PURE__*/React.createElement("div", {
     style: {
-      position: "relative"
+      position: "relative",
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "flex-end",
+      flexWrap: "wrap",
+      gap: 16
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
       fontWeight: 600,
@@ -1272,7 +1283,26 @@ function Dashboard({
       color: "rgba(255,255,255,0.72)",
       marginTop: 6
     }
-  }, totalAvailable, " units available across ", variants.length, " variants · ", openOrders, " open order", openOrders === 1 ? "" : "s"))), /*#__PURE__*/React.createElement("div", {
+  }, totalAvailable, " units available across ", variants.length, " variants · ", openOrders, " open order", openOrders === 1 ? "" : "s")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      fontWeight: 600,
+      letterSpacing: "0.06em",
+      textTransform: "uppercase",
+      color: "rgba(255,255,255,0.65)",
+      marginBottom: 5
+    }
+  }, "Report date"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: reportDate,
+    max: todayStr,
+    onChange: e => setReportDate(e.target.value || todayStr),
+    style: {
+      width: 160,
+      background: "rgba(255,255,255,0.92)",
+      border: "none"
+    }
+  })))), /*#__PURE__*/React.createElement("div", {
     className: "card",
     style: {
       padding: 16,
@@ -1394,13 +1424,13 @@ function Dashboard({
     tone: "gold",
     icon: "ti-lock"
   }), /*#__PURE__*/React.createElement(StatCard, {
-    label: "Today's inward",
-    value: todayIn,
+    label: `${dayLabel} inward`,
+    value: dayIn,
     tone: "green",
     icon: "ti-arrow-down-left"
   }), /*#__PURE__*/React.createElement(StatCard, {
-    label: "Today's outward",
-    value: todayOut,
+    label: `${dayLabel} outward`,
+    value: dayOut,
     tone: "rust",
     icon: "ti-arrow-up-right"
   }), /*#__PURE__*/React.createElement(StatCard, {
@@ -1408,7 +1438,41 @@ function Dashboard({
     value: openOrders,
     tone: "rust",
     icon: "ti-clipboard-list"
-  })), /*#__PURE__*/React.createElement("div", {
+  })), !isToday && /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: "14px 18px",
+      marginBottom: 24,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 16,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: C.sub
+    }
+  }, "Showing movement totals for ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: C.tealDeep
+    }
+  }, new Date(reportDate).toLocaleDateString("en-IN", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  })), " — ", dayMoves.length, " entr", dayMoves.length === 1 ? "y" : "ies", " that day."), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setTab && setTab("reports")
+  }, "View full report", /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-arrow-right",
+    style: {
+      verticalAlign: -2,
+      marginLeft: 6
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
     className: "card",
     style: {
       padding: "18px 20px",
@@ -3931,6 +3995,7 @@ function Orders({
   const [variantId, setVariantId] = useState("");
   const [qty, setQty] = useState(1);
   const [error, setError] = useState("");
+  const [orderRemark, setOrderRemark] = useState("");
   const [q, setQ] = useState("");
   const createOrder = () => {
     setError("");
@@ -3949,7 +4014,8 @@ function Orders({
       items: [{
         variantId,
         qty: qn
-      }]
+      }],
+      remark: orderRemark.trim()
     };
     setOrders([order, ...orders]);
     setStock({
@@ -3967,6 +4033,7 @@ function Orders({
     setCustomer("");
     setVariantId("");
     setQty(1);
+    setOrderRemark("");
   };
   const releaseOrder = order => {
     if (!perms.canManageOrders) return;
@@ -4026,7 +4093,7 @@ function Orders({
     if (!s) return true;
     const v0 = variantMap[o.items[0].variantId];
     const code = v0?.shortCode || "";
-    return o.customer.toLowerCase().includes(s) || code.toLowerCase().includes(s);
+    return o.customer.toLowerCase().includes(s) || code.toLowerCase().includes(s) || (o.remark || "").toLowerCase().includes(s);
   });
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionHeader, {
     eyebrow: "Fulfilment",
@@ -4075,6 +4142,15 @@ function Orders({
     },
     value: qty,
     onChange: e => setQty(e.target.value)
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Remark (optional)"
+  }, /*#__PURE__*/React.createElement("input", {
+    style: {
+      width: 180
+    },
+    value: orderRemark,
+    onChange: e => setOrderRemark(e.target.value),
+    placeholder: "Any note about this order…"
   })), /*#__PURE__*/React.createElement(Btn, {
     variant: "gold",
     onClick: createOrder
@@ -4116,8 +4192,8 @@ function Orders({
     style: {
       textAlign: "right"
     }
-  }, "Qty"), /*#__PURE__*/React.createElement("th", null, "Date"), /*#__PURE__*/React.createElement("th", null, "Status"), /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, filteredOrders.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
-    colSpan: 6,
+  }, "Qty"), /*#__PURE__*/React.createElement("th", null, "Date"), /*#__PURE__*/React.createElement("th", null, "Remark"), /*#__PURE__*/React.createElement("th", null, "Status"), /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, filteredOrders.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    colSpan: 7,
     style: {
       padding: 18,
       color: C.sub,
@@ -4155,7 +4231,13 @@ function Orders({
       style: {
         textAlign: "right"
       }
-    }, o.items[0].qty), /*#__PURE__*/React.createElement("td", null, o.date), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(Badge, {
+    }, o.items[0].qty), /*#__PURE__*/React.createElement("td", null, o.date), /*#__PURE__*/React.createElement("td", {
+      style: {
+        color: C.sub,
+        fontSize: 12,
+        maxWidth: 160
+      }
+    }, o.remark || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(Badge, {
       tone: toneFor(o.status)
     }, o.status)), /*#__PURE__*/React.createElement("td", {
       style: {

@@ -837,6 +837,49 @@ function App({
       }
     });
   };
+
+  // Confirming an order's sale releases the blocked quantity AND logs a proper
+  // "out" movement (with invoice/DC/remark) in a single, consistent update —
+  // done here at App level so the blocked-decrease and out-increase land on
+  // the very same stock object instead of two separate stale-state writes.
+  const confirmOrderSale = (order, invoice, dc) => {
+    if (!perms.canManageOrders) return;
+    const it = order.items[0];
+    setOrders(orders.map(o => o.id === order.id ? {
+      ...o,
+      status: "CONFIRMED",
+      invoice: (invoice || "").trim(),
+      dc: (dc || "").trim()
+    } : o));
+    const cur = stock[it.variantId] || {
+      opening: 0,
+      in: 0,
+      out: 0,
+      blocked: 0
+    };
+    setStock({
+      ...stock,
+      [it.variantId]: {
+        ...cur,
+        blocked: Math.max(0, (cur.blocked || 0) - it.qty),
+        out: (cur.out || 0) + it.qty
+      }
+    });
+    const remarkParts = [`Sale to ${order.customer}`, order.remark].filter(Boolean);
+    const entry = {
+      id: uid(),
+      variantId: it.variantId,
+      type: "out",
+      qty: it.qty,
+      date: today(),
+      invoice: (invoice || "").trim(),
+      dc: (dc || "").trim(),
+      remark: remarkParts.join(" · "),
+      loggedBy: username,
+      ts: Date.now()
+    };
+    setMovements([entry, ...movements]);
+  };
   if (!ready) return /*#__PURE__*/React.createElement("div", {
     style: {
       padding: 40
@@ -1073,7 +1116,8 @@ function App({
     stock: stock,
     setStock: setStock,
     available: available,
-    perms: perms
+    perms: perms,
+    confirmOrderSale: confirmOrderSale
   }), tab === "reports" && /*#__PURE__*/React.createElement(Reports, {
     movements: movements,
     setMovements: setMovements,
@@ -4085,7 +4129,8 @@ function Orders({
   stock,
   setStock,
   available,
-  perms
+  perms,
+  confirmOrderSale
 }) {
   const [customer, setCustomer] = useState("");
   const [variantId, setVariantId] = useState("");
@@ -4096,6 +4141,10 @@ function Orders({
   const [editingId, setEditingId] = useState(null);
   const [editCustomer, setEditCustomer] = useState("");
   const [editRemark, setEditRemark] = useState("");
+  const [confirmingId, setConfirmingId] = useState(null);
+  const [confirmInvoice, setConfirmInvoice] = useState("");
+  const [confirmDc, setConfirmDc] = useState("");
+  const [confirmError, setConfirmError] = useState("");
   const startEdit = o => {
     setEditingId(o.id);
     setEditCustomer(o.customer || "");
@@ -4171,29 +4220,20 @@ function Orders({
     });
     setStock(next);
   };
-  const confirmOrder = order => {
-    if (!perms.canManageOrders) return;
-    setOrders(orders.map(o => o.id === order.id ? {
-      ...o,
-      status: "CONFIRMED"
-    } : o));
-    const next = {
-      ...stock
-    };
-    order.items.forEach(it => {
-      const cur = next[it.variantId] || {
-        opening: 0,
-        in: 0,
-        out: 0,
-        blocked: 0
-      };
-      next[it.variantId] = {
-        ...cur,
-        blocked: Math.max(0, (cur.blocked || 0) - it.qty),
-        out: (cur.out || 0) + it.qty
-      };
-    });
-    setStock(next);
+  const startConfirm = o => {
+    setConfirmingId(o.id);
+    setConfirmInvoice("");
+    setConfirmDc("");
+    setConfirmError("");
+  };
+  const cancelConfirm = () => setConfirmingId(null);
+  const doConfirmSale = order => {
+    if (!confirmDc.trim()) {
+      setConfirmError("DC number is required.");
+      return;
+    }
+    confirmOrderSale(order, confirmInvoice, confirmDc);
+    setConfirmingId(null);
   };
   const toneFor = s => s === "BLOCKED" ? "gold" : s === "CONFIRMED" ? "green" : s === "RELEASED" ? "teal" : "rust";
   const selectedVariantRemark = (() => {
@@ -4350,8 +4390,9 @@ function Orders({
     const p0 = productMap[v0?.productId];
     const remarkText = v0 ? [v0.remark, p0?.remark].filter(Boolean).join(" · ") : "";
     const details = v0 ? [v0.colorCode ? `Color: ${v0.colorCode}` : null, v0.size ? `Size: ${v0.size}` : null, p0?.category === "Chair" && v0.seatColor ? `Seat: ${v0.seatColor}` : null, p0?.category === "Chair" ? `Headrest: ${v0.headrest === "Yes" ? "Yes" : "No"}` : null].filter(Boolean).join(" · ") : "";
-    return /*#__PURE__*/React.createElement("tr", {
-      key: o.id,
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: o.id
+    }, /*#__PURE__*/React.createElement("tr", {
       style: {
         borderTop: `1px solid ${C.line}`,
         borderLeft: o.status === "BLOCKED" ? `3px dashed ${C.gold}` : "3px solid transparent"
@@ -4434,11 +4475,71 @@ function Orders({
       }
     })), o.status === "BLOCKED" && perms.canManageOrders && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
       variant: "primary",
-      onClick: () => confirmOrder(o)
+      onClick: () => startConfirm(o)
     }, "Confirm sale"), /*#__PURE__*/React.createElement(Btn, {
       variant: "danger",
       onClick: () => releaseOrder(o)
-    }, "Release")))));
+    }, "Release"))))), confirmingId === o.id && /*#__PURE__*/React.createElement("tr", {
+      style: {
+        borderTop: `1px solid ${C.line}`,
+        background: C.tealSoft
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      colSpan: 8,
+      style: {
+        padding: 14
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        fontWeight: 600,
+        color: C.tealDeep,
+        marginBottom: 8,
+        textTransform: "uppercase",
+        letterSpacing: "0.04em"
+      }
+    }, "Confirming sale for ", o.customer, " — ", v0?.shortCode, " × ", o.items[0].qty), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        alignItems: "flex-end",
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement(Field, {
+      label: "Invoice number (optional)"
+    }, /*#__PURE__*/React.createElement("input", {
+      style: {
+        width: 150
+      },
+      value: confirmInvoice,
+      onChange: e => setConfirmInvoice(e.target.value),
+      placeholder: "Invoice number"
+    })), /*#__PURE__*/React.createElement(Field, {
+      label: "DC number"
+    }, /*#__PURE__*/React.createElement("input", {
+      style: {
+        width: 150,
+        borderColor: confirmError ? C.rust : C.line
+      },
+      value: confirmDc,
+      onChange: e => {
+        setConfirmDc(e.target.value);
+        if (confirmError) setConfirmError("");
+      },
+      placeholder: "DC number"
+    })), /*#__PURE__*/React.createElement(Btn, {
+      variant: "primary",
+      onClick: () => doConfirmSale(o)
+    }, "Confirm sale"), /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: cancelConfirm
+    }, "Cancel")), confirmError && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: C.rust,
+        marginTop: 8
+      }
+    }, confirmError))));
   })))));
 }
 function Users({

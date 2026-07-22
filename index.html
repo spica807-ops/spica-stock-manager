@@ -1215,6 +1215,8 @@ function Dashboard({
   setTab
 }) {
   const [q, setQ] = useState("");
+  const [showAllLow, setShowAllLow] = useState(false);
+  const [showAllNeg, setShowAllNeg] = useState(false);
   const todayStr = today();
   const [reportDate, setReportDate] = useState(todayStr);
   const dayMoves = movements.filter(m => m.date === reportDate);
@@ -1447,41 +1449,7 @@ function Dashboard({
     value: openOrders,
     tone: "rust",
     icon: "ti-clipboard-list"
-  })), !isToday && /*#__PURE__*/React.createElement("div", {
-    className: "card",
-    style: {
-      padding: "14px 18px",
-      marginBottom: 24,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 16,
-      flexWrap: "wrap"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 13,
-      color: C.sub
-    }
-  }, "Showing movement totals for ", /*#__PURE__*/React.createElement("strong", {
-    style: {
-      color: C.tealDeep
-    }
-  }, new Date(reportDate).toLocaleDateString("en-IN", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric"
-  })), " — ", dayMoves.length, " entr", dayMoves.length === 1 ? "y" : "ies", " that day."), /*#__PURE__*/React.createElement(Btn, {
-    variant: "ghost",
-    onClick: () => setTab && setTab("reports")
-  }, "View full report", /*#__PURE__*/React.createElement("i", {
-    className: "ti ti-arrow-right",
-    style: {
-      verticalAlign: -2,
-      marginLeft: 6
-    }
-  }))), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("div", {
     className: "card",
     style: {
       padding: "18px 20px",
@@ -1769,7 +1737,7 @@ function Dashboard({
       fontSize: 13,
       color: C.sub
     }
-  }, "Nothing running low right now."), lowStock.slice(0, 8).map(v => /*#__PURE__*/React.createElement("div", {
+  }, "Nothing running low right now."), (showAllLow ? lowStock : lowStock.slice(0, 10)).map(v => /*#__PURE__*/React.createElement("div", {
     key: v.id,
     style: {
       display: "flex",
@@ -1786,7 +1754,10 @@ function Dashboard({
     }
   }, v.shortCode || "—")), /*#__PURE__*/React.createElement(Badge, {
     tone: "rust"
-  }, "Low"))))), /*#__PURE__*/React.createElement("div", {
+  }, "Low"))), lowStock.length > 10 && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setShowAllLow(!showAllLow)
+  }, showAllLow ? "Show less" : `Show all ${lowStock.length}`))), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
       minWidth: 300
@@ -1832,7 +1803,7 @@ function Dashboard({
       fontSize: 13,
       color: C.sub
     }
-  }, "No stock is out or over-committed."), negativeStock.map(v => /*#__PURE__*/React.createElement("div", {
+  }, "No stock is out or over-committed."), (showAllNeg ? negativeStock : negativeStock.slice(0, 10)).map(v => /*#__PURE__*/React.createElement("div", {
     key: v.id,
     style: {
       display: "flex",
@@ -1849,7 +1820,10 @@ function Dashboard({
     }
   }, v.shortCode || "—")), /*#__PURE__*/React.createElement(Badge, {
     tone: "rust"
-  }, available(v.id) === 0 ? "Out of stock" : "Over-blocked")))))));
+  }, available(v.id) === 0 ? "Out of stock" : "Over-blocked"))), negativeStock.length > 10 && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: () => setShowAllNeg(!showAllNeg)
+  }, showAllNeg ? "Show less" : `Show all ${negativeStock.length}`)))));
 }
 function Mockup({
   products,

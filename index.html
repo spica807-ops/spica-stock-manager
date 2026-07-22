@@ -10,6 +10,7 @@
 <meta name="theme-color" content="#0A2B2C" />
 <link rel="icon" href="icon-192.png" />
 <link rel="apple-touch-icon" href="icon-192.png" />
+<meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Spica Stock" />
@@ -801,7 +802,11 @@ function App({
 
   // Logs a dated in/out movement AND updates the running total — this is what
   // powers the day-by-day report.
-  const logMovement = (variantId, type, qty, date, note) => {
+  const logMovement = (variantId, type, qty, date, {
+    invoice = "",
+    dc = "",
+    remark = ""
+  } = {}) => {
     if (!perms.canEditStock || !variantId || !qty) return;
     const q = Number(qty);
     if (q <= 0) return;
@@ -811,7 +816,9 @@ function App({
       type,
       qty: q,
       date: date || today(),
-      note: note || "",
+      invoice: invoice.trim(),
+      dc: dc.trim(),
+      remark: remark.trim(),
       loggedBy: username,
       ts: Date.now()
     };
@@ -1069,9 +1076,11 @@ function App({
     perms: perms
   }), tab === "reports" && /*#__PURE__*/React.createElement(Reports, {
     movements: movements,
+    setMovements: setMovements,
     variantMap: variantMap,
     productMap: productMap,
-    products: products
+    products: products,
+    perms: perms
   }), tab === "service" && /*#__PURE__*/React.createElement(ServiceReplacement, {
     serviceProducts: serviceProducts,
     setServiceProducts: setServiceProducts,
@@ -1624,7 +1633,7 @@ function Dashboard({
         fontSize: 12,
         marginTop: 3
       }
-    }, m.note ? `${m.note} · ` : "", m.loggedBy ? `logged by ${m.loggedBy}` : ""));
+    }, m.dc || m.remark || m.note ? `${[m.dc && `DC ${m.dc}`, m.remark || m.note].filter(Boolean).join(" · ")} · ` : "", m.loggedBy ? `logged by ${m.loggedBy}` : ""));
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
@@ -1707,7 +1716,7 @@ function Dashboard({
         fontSize: 12,
         marginTop: 3
       }
-    }, m.note ? `${m.note} · ` : "", m.loggedBy ? `logged by ${m.loggedBy}` : ""));
+    }, m.dc || m.remark || m.note ? `${[m.dc && `DC ${m.dc}`, m.remark || m.note].filter(Boolean).join(" · ")} · ` : "", m.loggedBy ? `logged by ${m.loggedBy}` : ""));
   })))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -3094,7 +3103,9 @@ function StockLedger({
   const [moveType, setMoveType] = useState("in");
   const [moveQty, setMoveQty] = useState(1);
   const [moveDate, setMoveDate] = useState(today());
-  const [moveNote, setMoveNote] = useState("");
+  const [moveInvoice, setMoveInvoice] = useState("");
+  const [moveDc, setMoveDc] = useState("");
+  const [moveRemark, setMoveRemark] = useState("");
   const [moveError, setMoveError] = useState("");
   const list = variants.filter(v => {
     if (filterProduct && v.productId !== filterProduct) return false;
@@ -3103,16 +3114,26 @@ function StockLedger({
     return (v.shortCode || "").toLowerCase().includes(s) || (productMap[v.productId]?.name || "").toLowerCase().includes(s);
   });
   const submitMove = () => {
-    if (!moveNote.trim()) {
-      setMoveError("PO number or DC number is required.");
+    if (!moveDc.trim()) {
+      setMoveError("DC number is required.");
+      return;
+    }
+    if (!moveRemark.trim()) {
+      setMoveError("Note is required.");
       return;
     }
     setMoveError("");
-    logMovement(moveVariant, moveType, moveQty, moveDate, moveNote);
+    logMovement(moveVariant, moveType, moveQty, moveDate, {
+      invoice: moveInvoice,
+      dc: moveDc,
+      remark: moveRemark
+    });
     setMoveVariant("");
     setMoveProduct("");
     setMoveQty(1);
-    setMoveNote("");
+    setMoveInvoice("");
+    setMoveDc("");
+    setMoveRemark("");
   };
   const moveVariantOptions = moveProduct ? variants.filter(v => v.productId === moveProduct) : variants;
   const exportSnapshot = () => {
@@ -3243,18 +3264,43 @@ function StockLedger({
     value: moveDate,
     onChange: e => setMoveDate(e.target.value)
   })), /*#__PURE__*/React.createElement(Field, {
-    label: "PO / DC number"
+    label: "Invoice number (optional)"
+  }, /*#__PURE__*/React.createElement("input", {
+    style: {
+      width: 150
+    },
+    value: moveInvoice,
+    onChange: e => {
+      setMoveInvoice(e.target.value);
+      if (moveError) setMoveError("");
+    },
+    placeholder: "Invoice number"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "DC number"
+  }, /*#__PURE__*/React.createElement("input", {
+    style: {
+      width: 150,
+      borderColor: moveError && !moveDc.trim() ? C.rust : C.line
+    },
+    value: moveDc,
+    onChange: e => {
+      setMoveDc(e.target.value);
+      if (moveError) setMoveError("");
+    },
+    placeholder: "DC number"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Note"
   }, /*#__PURE__*/React.createElement("input", {
     style: {
       width: 180,
-      borderColor: moveError ? C.rust : C.line
+      borderColor: moveError && !moveRemark.trim() ? C.rust : C.line
     },
-    value: moveNote,
+    value: moveRemark,
     onChange: e => {
-      setMoveNote(e.target.value);
+      setMoveRemark(e.target.value);
       if (moveError) setMoveError("");
     },
-    placeholder: "PO number or DC number"
+    placeholder: "Note…"
   })), /*#__PURE__*/React.createElement(Btn, {
     variant: "primary",
     onClick: submitMove
@@ -3397,14 +3443,37 @@ function StockLedger({
 }
 function Reports({
   movements,
+  setMovements,
   variantMap,
   productMap,
-  products
+  products,
+  perms
 }) {
   const [filterProduct, setFilterProduct] = useState("");
   const [q, setQ] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editInvoice, setEditInvoice] = useState("");
+  const [editDc, setEditDc] = useState("");
+  const [editRemark, setEditRemark] = useState("");
+  const startEdit = m => {
+    setEditingId(m.id);
+    setEditInvoice(m.invoice || "");
+    setEditDc(m.dc || "");
+    setEditRemark(m.remark || "");
+  };
+  const cancelEdit = () => setEditingId(null);
+  const saveEdit = () => {
+    if (!perms.isAdmin) return;
+    setMovements(movements.map(m => m.id === editingId ? {
+      ...m,
+      invoice: editInvoice.trim(),
+      dc: editDc.trim(),
+      remark: editRemark.trim()
+    } : m));
+    setEditingId(null);
+  };
   const setPeriod = kind => {
     const now = new Date();
     let from = new Date(now);
@@ -3429,7 +3498,7 @@ function Reports({
     if (toDate && m.date > toDate) return false;
     const s = q.trim().toLowerCase();
     if (s) {
-      const hay = `${v?.shortCode || ""} ${productMap[v?.productId]?.name || ""} ${m.note || ""}`.toLowerCase();
+      const hay = `${v?.shortCode || ""} ${productMap[v?.productId]?.name || ""} ${m.invoice || ""} ${m.dc || ""} ${m.remark || m.note || ""}`.toLowerCase();
       if (!hay.includes(s)) return false;
     }
     return true;
@@ -3445,7 +3514,9 @@ function Reports({
         Product: productMap[v?.productId]?.name || "",
         Type: m.type === "in" ? "Inward" : "Outward",
         Quantity: m.qty,
-        Note: m.note || "",
+        Invoice: m.invoice || "",
+        "DC number": m.dc || "",
+        Note: m.remark || m.note || "",
         LoggedBy: m.loggedBy || ""
       };
     });
@@ -3465,7 +3536,7 @@ function Reports({
     action: /*#__PURE__*/React.createElement(SearchBox, {
       value: q,
       onChange: setQ,
-      placeholder: "Search code, product, note…"
+      placeholder: "Search code, product, invoice, DC…"
     })
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -3597,8 +3668,9 @@ function Reports({
       style: {
         textAlign: "right"
       }
-    }, "Qty"), /*#__PURE__*/React.createElement("th", null, "Note"), /*#__PURE__*/React.createElement("th", null, "Logged by"))), /*#__PURE__*/React.createElement("tbody", null, rows.map(m => {
+    }, "Qty"), /*#__PURE__*/React.createElement("th", null, "Invoice"), /*#__PURE__*/React.createElement("th", null, "DC number"), /*#__PURE__*/React.createElement("th", null, "Note"), /*#__PURE__*/React.createElement("th", null, "Logged by"), perms.isAdmin && /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, rows.map(m => {
       const v = variantMap[m.variantId];
+      const isEditing = editingId === m.id;
       return /*#__PURE__*/React.createElement("tr", {
         key: m.id,
         style: {
@@ -3621,13 +3693,63 @@ function Reports({
         }
       }, m.qty), /*#__PURE__*/React.createElement("td", {
         style: {
-          color: C.sub
+          color: C.sub,
+          fontSize: 12
         }
-      }, m.note || "—"), /*#__PURE__*/React.createElement("td", {
+      }, isEditing ? /*#__PURE__*/React.createElement("input", {
+        style: {
+          width: 110
+        },
+        value: editInvoice,
+        onChange: e => setEditInvoice(e.target.value),
+        placeholder: "Invoice…"
+      }) : m.invoice || "—"), /*#__PURE__*/React.createElement("td", {
+        style: {
+          fontFamily: FONT_MONO,
+          fontSize: 12
+        }
+      }, isEditing ? /*#__PURE__*/React.createElement("input", {
+        style: {
+          width: 110
+        },
+        value: editDc,
+        onChange: e => setEditDc(e.target.value),
+        placeholder: "DC number"
+      }) : m.dc || "—"), /*#__PURE__*/React.createElement("td", {
         style: {
           color: C.sub
         }
-      }, m.loggedBy));
+      }, isEditing ? /*#__PURE__*/React.createElement("input", {
+        style: {
+          width: 150
+        },
+        value: editRemark,
+        onChange: e => setEditRemark(e.target.value),
+        placeholder: "Note…"
+      }) : m.remark || m.note || "—"), /*#__PURE__*/React.createElement("td", {
+        style: {
+          color: C.sub
+        }
+      }, m.loggedBy), perms.isAdmin && /*#__PURE__*/React.createElement("td", {
+        style: {
+          textAlign: "right",
+          whiteSpace: "nowrap"
+        }
+      }, isEditing ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
+        variant: "primary",
+        onClick: saveEdit
+      }, "Save"), " ", /*#__PURE__*/React.createElement(Btn, {
+        variant: "ghost",
+        onClick: cancelEdit
+      }, "Cancel")) : /*#__PURE__*/React.createElement(Btn, {
+        variant: "primary",
+        onClick: () => startEdit(m)
+      }, /*#__PURE__*/React.createElement("i", {
+        className: "ti ti-edit",
+        style: {
+          verticalAlign: -2
+        }
+      }))));
     }))));
   }));
 }

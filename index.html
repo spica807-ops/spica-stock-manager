@@ -1976,7 +1976,25 @@ function Mockup({
   const [dc, setDc] = useState("");
   const [note, setNote] = useState("");
   const [q, setQ] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editDc, setEditDc] = useState("");
+  const [editNote, setEditNote] = useState("");
   const todayStr = today();
+  const startEdit = s => {
+    setEditingId(s.id);
+    setEditDc(s.dc || "");
+    setEditNote(s.note || "");
+  };
+  const cancelEdit = () => setEditingId(null);
+  const saveEdit = () => {
+    if (!perms.canManageOrders) return;
+    setSamples(samples.map(s => s.id === editingId ? {
+      ...s,
+      dc: editDc.trim(),
+      note: editNote.trim()
+    } : s));
+    setEditingId(null);
+  };
 
   // Colors already used as variants for the selected product, so the person
   // sending the sample can pick from known colors instead of retyping them.
@@ -2027,7 +2045,11 @@ function Mockup({
     const term = q.trim().toLowerCase();
     const p = productMap[s.productId];
     return s.customer.toLowerCase().includes(term) || (p?.name || "").toLowerCase().includes(term) || (s.color || "").toLowerCase().includes(term) || (s.dc || "").toLowerCase().includes(term);
-  }).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  }).sort((a, b) => {
+    const d = (b.dateSent || "").localeCompare(a.dateSent || "");
+    if (d !== 0) return d;
+    return (b.ts || 0) - (a.ts || 0);
+  });
   const statusBadge = s => {
     if (s.status === "with_client") {
       const overdue = s.expectedReturn && s.expectedReturn < todayStr;
@@ -2232,8 +2254,8 @@ function Mockup({
     style: {
       textAlign: "right"
     }
-  }, "Qty"), /*#__PURE__*/React.createElement("th", null, "Sent"), /*#__PURE__*/React.createElement("th", null, "Expected return"), /*#__PURE__*/React.createElement("th", null, "DC number"), /*#__PURE__*/React.createElement("th", null, "Status"), /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, filtered.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
-    colSpan: 9,
+  }, "Qty"), /*#__PURE__*/React.createElement("th", null, "Sent"), /*#__PURE__*/React.createElement("th", null, "Expected return"), /*#__PURE__*/React.createElement("th", null, "DC number"), /*#__PURE__*/React.createElement("th", null, "Note"), /*#__PURE__*/React.createElement("th", null, "Status"), /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, filtered.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    colSpan: 10,
     style: {
       padding: 18,
       color: C.sub,
@@ -2278,12 +2300,52 @@ function Mockup({
         fontFamily: FONT_MONO,
         fontSize: 12
       }
-    }, s.dc || "—"), /*#__PURE__*/React.createElement("td", null, statusBadge(s)), /*#__PURE__*/React.createElement("td", {
+    }, editingId === s.id ? /*#__PURE__*/React.createElement("input", {
+      style: {
+        width: 110
+      },
+      value: editDc,
+      onChange: e => setEditDc(e.target.value),
+      placeholder: "DC number"
+    }) : s.dc || "—"), /*#__PURE__*/React.createElement("td", {
+      style: {
+        color: C.sub,
+        fontSize: 12,
+        maxWidth: 150
+      }
+    }, editingId === s.id ? /*#__PURE__*/React.createElement("input", {
+      style: {
+        width: 150
+      },
+      value: editNote,
+      onChange: e => setEditNote(e.target.value),
+      placeholder: "Note…"
+    }) : s.note || "—"), /*#__PURE__*/React.createElement("td", null, statusBadge(s)), /*#__PURE__*/React.createElement("td", {
       style: {
         textAlign: "right",
         whiteSpace: "nowrap"
       }
-    }, perms.canManageOrders && s.status === "with_client" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
+    }, editingId === s.id ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
+      variant: "primary",
+      onClick: saveEdit,
+      style: {
+        marginRight: 6
+      }
+    }, "Save"), /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      onClick: cancelEdit
+    }, "Cancel")) : /*#__PURE__*/React.createElement(React.Fragment, null, perms.canManageOrders && /*#__PURE__*/React.createElement(Btn, {
+      variant: "primary",
+      onClick: () => startEdit(s),
+      style: {
+        marginRight: 6
+      }
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "ti ti-edit",
+      style: {
+        verticalAlign: -2
+      }
+    })), perms.canManageOrders && s.status === "with_client" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Btn, {
       variant: "ghost",
       onClick: () => setStatus(s.id, "returned"),
       style: {
@@ -2298,7 +2360,7 @@ function Mockup({
     }, "Liked it — Order")), perms.canDelete && /*#__PURE__*/React.createElement(Btn, {
       variant: "danger",
       onClick: () => removeSample(s.id)
-    }, /*#__PURE__*/React.createElement(TrashIcon, null))));
+    }, /*#__PURE__*/React.createElement(TrashIcon, null)))));
   })))), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,

@@ -758,8 +758,9 @@ function App({
   const [samples, setSamples, samplesReady] = useSyncedDoc("samples", []);
   const [serviceProducts, setServiceProducts, serviceProductsReady] = useSyncedDoc("serviceProducts", []);
   const [serviceEntries, setServiceEntries, serviceEntriesReady] = useSyncedDoc("serviceEntries", []);
+  const [categories, setCategories, categoriesReady] = useSyncedDoc("categories", ["Chair", "Table", "Sofa", "Other"]);
   const [users, usersReady] = useUsers();
-  const ready = productsReady && variantsReady && stockReady && ordersReady && movementsReady && samplesReady && serviceProductsReady && serviceEntriesReady;
+  const ready = productsReady && variantsReady && stockReady && ordersReady && movementsReady && samplesReady && serviceProductsReady && serviceEntriesReady && categoriesReady;
   const perms = {
     isAdmin: role === "admin",
     canEditCatalogue: role === "admin",
@@ -1090,7 +1091,9 @@ function App({
     setStock: setStock,
     samples: samples,
     setSamples: setSamples,
-    perms: perms
+    perms: perms,
+    categories: categories,
+    setCategories: setCategories
   }), tab === "variants" && /*#__PURE__*/React.createElement(Variants, {
     products: products,
     variants: variants,
@@ -1273,6 +1276,7 @@ function Dashboard({
     day: "numeric",
     month: "short"
   }) + "'s";
+  const daySamples = samples.filter(s => s.dateSent === reportDate);
   const searchResults = q.trim() ? variants.filter(v => {
     const s = q.trim().toLowerCase();
     const p = productMap[v.productId];
@@ -1729,6 +1733,89 @@ function Dashboard({
         marginTop: 3
       }
     }, m.dc || m.remark || m.note ? `${[m.dc && `DC ${m.dc}`, m.remark || m.note].filter(Boolean).join(" · ")} · ` : "", m.loggedBy ? `logged by ${m.loggedBy}` : ""));
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 280
+    },
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 18
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 26,
+      height: 26,
+      borderRadius: 7,
+      background: C.goldSoft,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-send",
+    style: {
+      fontSize: 14,
+      color: C.gold
+    },
+    "aria-hidden": "true"
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: FONT_DISPLAY,
+      fontSize: 16,
+      fontWeight: 600,
+      color: C.tealDeep
+    }
+  }, dayLabel, " samples sent")), /*#__PURE__*/React.createElement(Badge, {
+    tone: "gold"
+  }, daySamples.length)), daySamples.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: C.sub
+    }
+  }, "No samples sent ", isToday ? "today" : "on this date", "."), daySamples.map(s => {
+    const p = productMap[s.productId];
+    return /*#__PURE__*/React.createElement("div", {
+      key: s.id,
+      style: {
+        padding: "8px 0",
+        borderBottom: `1px solid ${C.line}`,
+        fontSize: 13
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("span", null, p?.name || "—", " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.sub,
+        fontFamily: FONT_MONO,
+        fontSize: 12
+      }
+    }, s.color || "—")), /*#__PURE__*/React.createElement(Badge, {
+      tone: "gold"
+    }, "×", s.qty)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: C.sub,
+        fontSize: 12,
+        marginTop: 3
+      }
+    }, s.customer, s.dc ? ` · DC ${s.dc}` : ""));
   })))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -1886,6 +1973,7 @@ function Mockup({
   const [qty, setQty] = useState(1);
   const [dateSent, setDateSent] = useState(today());
   const [expectedReturn, setExpectedReturn] = useState("");
+  const [dc, setDc] = useState("");
   const [note, setNote] = useState("");
   const [q, setQ] = useState("");
   const todayStr = today();
@@ -1907,6 +1995,7 @@ function Mockup({
       qty: Number(qty),
       dateSent,
       expectedReturn,
+      dc: dc.trim(),
       note: note.trim(),
       status: "with_client",
       ts: Date.now()
@@ -1918,6 +2007,7 @@ function Mockup({
     setCustomColor(false);
     setQty(1);
     setExpectedReturn("");
+    setDc("");
     setNote("");
   };
   const setStatus = (id, status) => {
@@ -1936,8 +2026,8 @@ function Mockup({
     if (!q.trim()) return true;
     const term = q.trim().toLowerCase();
     const p = productMap[s.productId];
-    return s.customer.toLowerCase().includes(term) || (p?.name || "").toLowerCase().includes(term) || (s.color || "").toLowerCase().includes(term);
-  });
+    return s.customer.toLowerCase().includes(term) || (p?.name || "").toLowerCase().includes(term) || (s.color || "").toLowerCase().includes(term) || (s.dc || "").toLowerCase().includes(term);
+  }).sort((a, b) => (b.ts || 0) - (a.ts || 0));
   const statusBadge = s => {
     if (s.status === "with_client") {
       const overdue = s.expectedReturn && s.expectedReturn < todayStr;
@@ -2093,6 +2183,15 @@ function Mockup({
     value: expectedReturn,
     onChange: e => setExpectedReturn(e.target.value)
   })), /*#__PURE__*/React.createElement(Field, {
+    label: "DC number"
+  }, /*#__PURE__*/React.createElement("input", {
+    style: {
+      width: 140
+    },
+    value: dc,
+    onChange: e => setDc(e.target.value),
+    placeholder: "DC number"
+  })), /*#__PURE__*/React.createElement(Field, {
     label: "Note"
   }, /*#__PURE__*/React.createElement("input", {
     style: {
@@ -2133,8 +2232,8 @@ function Mockup({
     style: {
       textAlign: "right"
     }
-  }, "Qty"), /*#__PURE__*/React.createElement("th", null, "Sent"), /*#__PURE__*/React.createElement("th", null, "Expected return"), /*#__PURE__*/React.createElement("th", null, "Status"), /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, filtered.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
-    colSpan: 8,
+  }, "Qty"), /*#__PURE__*/React.createElement("th", null, "Sent"), /*#__PURE__*/React.createElement("th", null, "Expected return"), /*#__PURE__*/React.createElement("th", null, "DC number"), /*#__PURE__*/React.createElement("th", null, "Status"), /*#__PURE__*/React.createElement("th", null))), /*#__PURE__*/React.createElement("tbody", null, filtered.length === 0 && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    colSpan: 9,
     style: {
       padding: 18,
       color: C.sub,
@@ -2174,7 +2273,12 @@ function Mockup({
       style: {
         textAlign: "right"
       }
-    }, s.qty), /*#__PURE__*/React.createElement("td", null, s.dateSent), /*#__PURE__*/React.createElement("td", null, s.expectedReturn || "—"), /*#__PURE__*/React.createElement("td", null, statusBadge(s)), /*#__PURE__*/React.createElement("td", {
+    }, s.qty), /*#__PURE__*/React.createElement("td", null, s.dateSent), /*#__PURE__*/React.createElement("td", null, s.expectedReturn || "—"), /*#__PURE__*/React.createElement("td", {
+      style: {
+        fontFamily: FONT_MONO,
+        fontSize: 12
+      }
+    }, s.dc || "—"), /*#__PURE__*/React.createElement("td", null, statusBadge(s)), /*#__PURE__*/React.createElement("td", {
       style: {
         textAlign: "right",
         whiteSpace: "nowrap"
@@ -2212,17 +2316,21 @@ function Products({
   setStock,
   samples,
   setSamples,
-  perms
+  perms,
+  categories,
+  setCategories
 }) {
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
-  const [category, setCategory] = useState("Chair");
+  const [category, setCategory] = useState(categories[0] || "Chair");
   const [remark, setRemark] = useState("");
   const [q, setQ] = useState("");
   const [importMsg, setImportMsg] = useState("");
   const [selected, setSelected] = useState(() => new Set());
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
+  const [newCategory, setNewCategory] = useState("");
+  const [categoryMsg, setCategoryMsg] = useState("");
   const fileInputRef = useRef(null);
   const add = () => {
     if (!perms.canEditCatalogue || !name.trim() || !code.trim()) return;
@@ -2236,6 +2344,20 @@ function Products({
     setName("");
     setCode("");
     setRemark("");
+  };
+  const addCategory = () => {
+    if (!perms.isAdmin) return;
+    const trimmed = newCategory.trim();
+    if (!trimmed) return;
+    const exists = categories.some(c => c.toLowerCase() === trimmed.toLowerCase());
+    if (exists) {
+      setCategoryMsg(`"${trimmed}" already exists.`);
+      return;
+    }
+    setCategories([...categories, trimmed]);
+    setCategory(trimmed);
+    setNewCategory("");
+    setCategoryMsg(`"${trimmed}" added.`);
   };
   const canEditRow = perms.isAdmin || perms.canEditVariants; // admin: full edit, warehouse: remark only
   const startEdit = p => {
@@ -2381,7 +2503,7 @@ function Products({
         const size = sizeIdx > -1 ? (r[sizeIdx] || "").trim() : "";
         const availStock = availIdx > -1 ? Number(r[availIdx]) || 0 : 0;
         let cat = catIdx > -1 ? (r[catIdx] || "").trim() : "Other";
-        if (!CATEGORIES.includes(cat)) cat = "Other";
+        if (!categories.includes(cat)) cat = "Other";
 
         // Reuse the product if the code already exists (in Firestore or earlier in this file), else create it.
         let product = productByCode.get(cd);
@@ -2461,7 +2583,72 @@ function Products({
       onChange: setQ,
       placeholder: "Search name, code, remark…"
     })
-  }), perms.canEditCatalogue && /*#__PURE__*/React.createElement("div", {
+  }), perms.isAdmin && /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 16,
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: C.tealDeep,
+      marginBottom: 6,
+      textTransform: "uppercase",
+      letterSpacing: "0.04em"
+    }
+  }, "Manage categories"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.sub,
+      marginBottom: 10
+    }
+  }, "Add a new category on the fly — it'll show up in the Category dropdown right away, for this product and any future ones."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      flexWrap: "wrap",
+      marginBottom: 10
+    }
+  }, categories.map(c => /*#__PURE__*/React.createElement(Badge, {
+    key: c,
+    tone: "teal"
+  }, c))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "flex-end",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "New category"
+  }, /*#__PURE__*/React.createElement("input", {
+    style: {
+      width: 180
+    },
+    value: newCategory,
+    onChange: e => {
+      setNewCategory(e.target.value);
+      if (categoryMsg) setCategoryMsg("");
+    },
+    placeholder: "e.g. Storage"
+  })), /*#__PURE__*/React.createElement(Btn, {
+    variant: "primary",
+    onClick: addCategory
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-plus",
+    style: {
+      verticalAlign: -2,
+      marginRight: 4
+    }
+  }), "Add category")), categoryMsg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.tealDeep,
+      marginTop: 8
+    }
+  }, categoryMsg)), perms.canEditCatalogue && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -2495,7 +2682,7 @@ function Products({
     },
     value: category,
     onChange: e => setCategory(e.target.value)
-  }, CATEGORIES.map(c => /*#__PURE__*/React.createElement("option", {
+  }, categories.map(c => /*#__PURE__*/React.createElement("option", {
     key: c
   }, c)))), /*#__PURE__*/React.createElement(Field, {
     label: "Remark"
@@ -2536,7 +2723,7 @@ function Products({
       color: C.sub,
       marginBottom: 10
     }
-  }, "Upload a CSV with ", /*#__PURE__*/React.createElement("code", null, "Product name"), ", ", /*#__PURE__*/React.createElement("code", null, "Product code"), ", ", /*#__PURE__*/React.createElement("code", null, "Category"), ", ", /*#__PURE__*/React.createElement("code", null, "Colour code"), ", ", /*#__PURE__*/React.createElement("code", null, "Size"), ", ", /*#__PURE__*/React.createElement("code", null, "Available stock"), " columns. One row = one variant. Existing product codes are reused (not duplicated) — ", /*#__PURE__*/React.createElement("code", null, "Category"), " must be Chair, Table, Sofa, or Other; anything else (or blank) becomes Other, and it's only applied when creating a new product. If a product + colour + size combo already exists, its stock is updated to match the value you give — otherwise a new variant is created."), /*#__PURE__*/React.createElement("div", {
+  }, "Upload a CSV with ", /*#__PURE__*/React.createElement("code", null, "Product name"), ", ", /*#__PURE__*/React.createElement("code", null, "Product code"), ", ", /*#__PURE__*/React.createElement("code", null, "Category"), ", ", /*#__PURE__*/React.createElement("code", null, "Colour code"), ", ", /*#__PURE__*/React.createElement("code", null, "Size"), ", ", /*#__PURE__*/React.createElement("code", null, "Available stock"), " columns. One row = one variant. Existing product codes are reused (not duplicated) — ", /*#__PURE__*/React.createElement("code", null, "Category"), " must match one of the categories listed above (case-sensitive); anything else (or blank) becomes Other, and it's only applied when creating a new product. If a product + colour + size combo already exists, its stock is updated to match the value you give — otherwise a new variant is created."), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -2677,7 +2864,7 @@ function Products({
         ...editForm,
         category: e.target.value
       })
-    }, CATEGORIES.map(c => /*#__PURE__*/React.createElement("option", {
+    }, categories.map(c => /*#__PURE__*/React.createElement("option", {
       key: c
     }, c))) : /*#__PURE__*/React.createElement(Badge, {
       tone: "teal"

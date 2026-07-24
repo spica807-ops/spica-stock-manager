@@ -206,15 +206,40 @@ function useSyncedDoc(name, fallback) {
     });
     return unsub;
   }, [name]);
-  const save = useCallback(next => {
-    setValue(next);
-    DOC(name).set({
-      payload: next
-    }).catch(err => {
-      console.error(`Failed to save "${name}":`, err);
-      reportSyncError(`Couldn't save your last change to ${name} — check your connection.`);
-    });
-  }, [name]);
+  // `save` accepts either a plain next-value (legacy, kept for safety) OR an
+  // updater function (prevServerValue => nextValue). The updater form runs
+  // inside a Firestore transaction that reads the FRESHEST server copy right
+  // before writing — this is what prevents two near-simultaneous saves (two
+  // open tabs, two staff members, a slow connection, etc.) from silently
+  // clobbering each other's changes, which is what was causing added
+  // products/variants to "disappear" a couple of minutes after being added.
+  const save = useCallback(nextOrUpdater => {
+    if (typeof nextOrUpdater === "function") {
+      const ref = DOC(name);
+      db.runTransaction(async tx => {
+        const snap = await tx.get(ref);
+        const current = snap.exists ? snap.data().payload : fallback;
+        const next = nextOrUpdater(current);
+        tx.set(ref, {
+          payload: next
+        });
+        return next;
+      }).then(next => {
+        setValue(next);
+      }).catch(err => {
+        console.error(`Failed to save "${name}":`, err);
+        reportSyncError(`Couldn't save your last change to ${name} — check your connection.`);
+      });
+    } else {
+      setValue(nextOrUpdater);
+      DOC(name).set({
+        payload: nextOrUpdater
+      }).catch(err => {
+        console.error(`Failed to save "${name}":`, err);
+        reportSyncError(`Couldn't save your last change to ${name} — check your connection.`);
+      });
+    }
+  }, [name, fallback]);
   return [value, save, ready];
 }
 
@@ -787,10 +812,10 @@ function App({
   }, [getStock]);
   const setOpening = (id, value) => {
     if (!perms.canEditOpeningStock) return;
-    setStock({
-      ...stock,
+    setStock(prevStock => ({
+      ...prevStock,
       [id]: {
-        ...(stock[id] || {
+        ...(prevStock[id] || {
           opening: 0,
           in: 0,
           out: 0,
@@ -798,7 +823,7 @@ function App({
         }),
         opening: Number(value) || 0
       }
-    });
+    }));
   };
 
   // Logs a dated in/out movement AND updates the running total — this is what
@@ -823,48 +848,52 @@ function App({
       loggedBy: username,
       ts: Date.now()
     };
-    setMovements([entry, ...movements]);
-    const cur = stock[variantId] || {
-      opening: 0,
-      in: 0,
-      out: 0,
-      blocked: 0
-    };
-    setStock({
-      ...stock,
-      [variantId]: {
-        ...cur,
-        [type]: (cur[type] || 0) + q
-      }
+    setMovements(prevMovements => [entry, ...prevMovements]);
+    setStock(prevStock => {
+      const cur = prevStock[variantId] || {
+        opening: 0,
+        in: 0,
+        out: 0,
+        blocked: 0
+      };
+      return {
+        ...prevStock,
+        [variantId]: {
+          ...cur,
+          [type]: (cur[type] || 0) + q
+        }
+      };
     });
   };
 
   // Confirming an order's sale releases the blocked quantity AND logs a proper
-  // "out" movement (with invoice/DC/remark) in a single, consistent update —
-  // done here at App level so the blocked-decrease and out-increase land on
-  // the very same stock object instead of two separate stale-state writes.
+  // "out" movement (with invoice/DC/remark). Both the orders and stock updates
+  // go through the transactional updater form so they always apply on top of
+  // the freshest server data, not a possibly-stale local copy.
   const confirmOrderSale = (order, invoice, dc) => {
     if (!perms.canManageOrders) return;
     const it = order.items[0];
-    setOrders(orders.map(o => o.id === order.id ? {
+    setOrders(prevOrders => prevOrders.map(o => o.id === order.id ? {
       ...o,
       status: "CONFIRMED",
       invoice: (invoice || "").trim(),
       dc: (dc || "").trim()
     } : o));
-    const cur = stock[it.variantId] || {
-      opening: 0,
-      in: 0,
-      out: 0,
-      blocked: 0
-    };
-    setStock({
-      ...stock,
-      [it.variantId]: {
-        ...cur,
-        blocked: Math.max(0, (cur.blocked || 0) - it.qty),
-        out: (cur.out || 0) + it.qty
-      }
+    setStock(prevStock => {
+      const cur = prevStock[it.variantId] || {
+        opening: 0,
+        in: 0,
+        out: 0,
+        blocked: 0
+      };
+      return {
+        ...prevStock,
+        [it.variantId]: {
+          ...cur,
+          blocked: Math.max(0, (cur.blocked || 0) - it.qty),
+          out: (cur.out || 0) + it.qty
+        }
+      };
     });
     const remarkParts = [`Sale to ${order.customer}`, order.remark].filter(Boolean);
     const entry = {
@@ -879,7 +908,7 @@ function App({
       loggedBy: username,
       ts: Date.now()
     };
-    setMovements([entry, ...movements]);
+    setMovements(prevMovements => [entry, ...prevMovements]);
   };
   if (!ready) return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -1988,7 +2017,7 @@ function Mockup({
   const cancelEdit = () => setEditingId(null);
   const saveEdit = () => {
     if (!perms.canManageOrders) return;
-    setSamples(samples.map(s => s.id === editingId ? {
+    setSamples(prev => prev.map(s => s.id === editingId ? {
       ...s,
       dc: editDc.trim(),
       note: editNote.trim()
@@ -2018,7 +2047,7 @@ function Mockup({
       status: "with_client",
       ts: Date.now()
     };
-    setSamples([s, ...samples]);
+    setSamples(prev => [s, ...prev]);
     setCustomer("");
     setProductId("");
     setColor("");
@@ -2030,7 +2059,7 @@ function Mockup({
   };
   const setStatus = (id, status) => {
     if (!perms.canManageOrders) return;
-    setSamples(samples.map(s => s.id === id ? {
+    setSamples(prev => prev.map(s => s.id === id ? {
       ...s,
       status
     } : s));
@@ -2038,7 +2067,7 @@ function Mockup({
   const removeSample = id => {
     if (!perms.canDelete) return;
     if (!window.confirm("Delete this sample record? This can't be undone.")) return;
-    setSamples(samples.filter(s => s.id !== id));
+    setSamples(prev => prev.filter(s => s.id !== id));
   };
   const filtered = samples.filter(s => {
     if (!q.trim()) return true;
@@ -2393,13 +2422,21 @@ function Products({
   const [editForm, setEditForm] = useState({});
   const [newCategory, setNewCategory] = useState("");
   const [categoryMsg, setCategoryMsg] = useState("");
+  const [addError, setAddError] = useState("");
   const fileInputRef = useRef(null);
   const add = () => {
     if (!perms.canEditCatalogue || !name.trim() || !code.trim()) return;
-    setProducts([...products, {
+    const trimmedCode = code.trim().toUpperCase();
+    const dupe = products.some(p => (p.code || "").toUpperCase() === trimmedCode);
+    if (dupe) {
+      setAddError(`Product code "${trimmedCode}" is already used by another product — codes must be unique.`);
+      return;
+    }
+    setAddError("");
+    setProducts(prev => [...prev, {
       id: uid(),
       name: name.trim(),
-      code: code.trim().toUpperCase(),
+      code: trimmedCode,
       category,
       remark: remark.trim()
     }]);
@@ -2416,12 +2453,29 @@ function Products({
       setCategoryMsg(`"${trimmed}" already exists.`);
       return;
     }
-    setCategories([...categories, trimmed]);
+    setCategories(prev => [...prev, trimmed]);
     setCategory(trimmed);
     setNewCategory("");
     setCategoryMsg(`"${trimmed}" added.`);
   };
   const canEditRow = perms.isAdmin || perms.canEditVariants; // admin: full edit, warehouse: remark only
+
+  // Surface any product codes shared by more than one product — this causes
+  // variant short codes/SKUs to collide and can misattribute rows during
+  // bulk import, so admins should rename one of each pair.
+  const duplicateCodeGroups = useMemo(() => {
+    const byCode = new Map();
+    products.forEach(p => {
+      const c = (p.code || "").toUpperCase();
+      if (!c) return;
+      if (!byCode.has(c)) byCode.set(c, []);
+      byCode.get(c).push(p.name);
+    });
+    return [...byCode.entries()].filter(([, names]) => names.length > 1).map(([code, names]) => ({
+      code,
+      names
+    }));
+  }, [products]);
   const startEdit = p => {
     if (!canEditRow) return;
     setEditingId(p.id);
@@ -2436,9 +2490,19 @@ function Products({
     setEditingId(null);
     setEditForm({});
   };
+  const [editError, setEditError] = useState("");
   const saveEdit = id => {
+    if (perms.isAdmin) {
+      const nextCode = (editForm.code || "").trim().toUpperCase() || products.find(p => p.id === id)?.code;
+      const dupe = products.some(p => p.id !== id && (p.code || "").toUpperCase() === nextCode);
+      if (dupe) {
+        setEditError(`Product code "${nextCode}" is already used by another product — codes must be unique.`);
+        return;
+      }
+    }
     if (!window.confirm("Save changes to this product?")) return;
-    setProducts(products.map(p => {
+    setEditError("");
+    setProducts(prev => prev.map(p => {
       if (p.id !== id) return p;
       if (perms.isAdmin) {
         return {
@@ -2461,7 +2525,7 @@ function Products({
   const remove = id => {
     if (!perms.canDelete) return;
     if (!window.confirm("Delete this product? Its variants and stock history will stay, but the product itself will be removed.")) return;
-    setProducts(products.filter(x => x.id !== id));
+    setProducts(prev => prev.filter(x => x.id !== id));
   };
   const toggleSelect = id => setSelected(prev => {
     const next = new Set(prev);
@@ -2476,7 +2540,7 @@ function Products({
   const bulkRemove = () => {
     if (!perms.canDelete || selected.size === 0) return;
     if (!window.confirm(`Delete ${selected.size} selected product${selected.size === 1 ? "" : "s"}? Their variants and stock history will stay, but the products themselves will be removed.`)) return;
-    setProducts(products.filter(p => !selected.has(p.id)));
+    setProducts(prev => prev.filter(p => !selected.has(p.id)));
     setSelected(new Set());
   };
 
@@ -2547,6 +2611,22 @@ function Products({
         return;
       }
 
+      // Guard: if the existing catalogue already has two products sharing the
+      // same code (e.g. created before duplicate-code checking was added),
+      // a code-keyed lookup below can't tell them apart — rows meant for one
+      // product would silently get attached to the other. Refuse the import
+      // and tell the admin exactly which codes need fixing first.
+      const codeCounts = {};
+      products.forEach(p => {
+        const c = (p.code || "").toUpperCase();
+        if (c) codeCounts[c] = (codeCounts[c] || 0) + 1;
+      });
+      const dupeCodes = Object.entries(codeCounts).filter(([, n]) => n > 1).map(([c]) => c);
+      if (dupeCodes.length > 0) {
+        setImportMsg(`Import stopped: these product codes are used by more than one product already — ${dupeCodes.join(", ")}. Fix them (Products tab, admin edit) so every code is unique, then try importing again.`);
+        return;
+      }
+
       // Work on local copies so codes/variants added mid-file are recognised by later rows.
       const nextProducts = [...products];
       const nextVariants = [...variants];
@@ -2557,7 +2637,8 @@ function Products({
       let productsAdded = 0,
         variantsAdded = 0,
         variantsUpdated = 0;
-      rows.slice(1).forEach(r => {
+      const skippedRows = [];
+      rows.slice(1).forEach((r, rowIdx) => {
         const nm = (r[nameIdx] || "").trim();
         const cd = (r[codeIdx] || "").trim().toUpperCase();
         if (!nm || !cd) return;
@@ -2579,6 +2660,13 @@ function Products({
           nextProducts.push(product);
           productByCode.set(cd, product);
           productsAdded++;
+        } else if (product.name.trim().toLowerCase() !== nm.toLowerCase()) {
+          // Same code, different product name — almost certainly two different
+          // products accidentally sharing a code in the CSV. Don't guess which
+          // one is right; skip the row and report it instead of silently
+          // merging it into the wrong product.
+          skippedRows.push(`Row ${rowIdx + 2}: code "${cd}" is already used by "${product.name}", but this row says "${nm}" — skipped.`);
+          return;
         }
         if (!colorCode && !size) return; // no variant info on this row — product-only row
 
@@ -2627,7 +2715,9 @@ function Products({
       }
       const parts = [`${productsAdded} new product${productsAdded === 1 ? "" : "s"}`, `${variantsAdded} new variant${variantsAdded === 1 ? "" : "s"}`];
       if (variantsUpdated > 0) parts.push(`${variantsUpdated} existing variant${variantsUpdated === 1 ? "" : "s"} updated to the given available stock`);
-      setImportMsg(`Imported: ${parts.join(", ")}.`);
+      let msg = `Imported: ${parts.join(", ")}.`;
+      if (skippedRows.length > 0) msg += ` ${skippedRows.length} row${skippedRows.length === 1 ? "" : "s"} skipped due to a code clash: ${skippedRows.join(" ")}`;
+      setImportMsg(msg);
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -2712,9 +2802,12 @@ function Products({
     }
   }, categoryMsg)), perms.canEditCatalogue && /*#__PURE__*/React.createElement("div", {
     style: {
+      marginBottom: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
       display: "flex",
       gap: 10,
-      marginBottom: 20,
       alignItems: "flex-end",
       flexWrap: "wrap"
     }
@@ -2731,10 +2824,14 @@ function Products({
     label: "Product code"
   }, /*#__PURE__*/React.createElement("input", {
     style: {
-      width: 140
+      width: 140,
+      borderColor: addError ? C.rust : C.line
     },
     value: code,
-    onChange: e => setCode(e.target.value),
+    onChange: e => {
+      setCode(e.target.value);
+      if (addError) setAddError("");
+    },
     placeholder: "SFA"
   })), /*#__PURE__*/React.createElement(Field, {
     label: "Category"
@@ -2764,7 +2861,55 @@ function Products({
       verticalAlign: -2,
       marginRight: 4
     }
-  }), "Add product")), perms.isAdmin && /*#__PURE__*/React.createElement("div", {
+  }), "Add product")), addError && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.rust,
+      marginTop: 8
+    }
+  }, addError)), perms.isAdmin && duplicateCodeGroups.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      padding: 16,
+      marginBottom: 20,
+      borderColor: C.rust
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: C.rust,
+      marginBottom: 6,
+      textTransform: "uppercase",
+      letterSpacing: "0.04em"
+    }
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "ti ti-alert-triangle",
+    style: {
+      verticalAlign: -2,
+      marginRight: 4
+    }
+  }), "Duplicate product codes found"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.sub,
+      marginBottom: 8
+    }
+  }, "These codes are shared by more than one product. This causes variant short codes/SKUs to collide and can misattribute rows during bulk import. Edit one of each pair below to give it a unique code."), duplicateCodeGroups.map(({
+    code: dupCode,
+    names
+  }) => /*#__PURE__*/React.createElement("div", {
+    key: dupCode,
+    style: {
+      fontSize: 13,
+      padding: "5px 0"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: FONT_MONO,
+      fontWeight: 600
+    }
+  }, dupCode), " — used by: ", names.join(", ")))), perms.isAdmin && /*#__PURE__*/React.createElement("div", {
     className: "card",
     style: {
       padding: 16,
@@ -2881,8 +3026,9 @@ function Products({
     }
   }, products.length === 0 ? "No products yet." : "No products match your search.")), filtered.map(p => {
     const editing = editingId === p.id;
-    return /*#__PURE__*/React.createElement("tr", {
-      key: p.id,
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: p.id
+    }, /*#__PURE__*/React.createElement("tr", {
       style: {
         borderTop: `1px solid ${C.line}`,
         borderLeft: p.remark ? `3px dashed ${C.rust}` : "3px solid transparent",
@@ -2980,7 +3126,18 @@ function Products({
     }, /*#__PURE__*/React.createElement(PencilIcon, null)), perms.canDelete && /*#__PURE__*/React.createElement(Btn, {
       variant: "danger",
       onClick: () => remove(p.id)
-    }, /*#__PURE__*/React.createElement(TrashIcon, null)))));
+    }, /*#__PURE__*/React.createElement(TrashIcon, null))))), editing && editError && /*#__PURE__*/React.createElement("tr", {
+      style: {
+        background: C.tealSoft
+      }
+    }, /*#__PURE__*/React.createElement("td", {
+      colSpan: perms.canDelete ? 7 : 6,
+      style: {
+        padding: "6px 12px",
+        fontSize: 12,
+        color: C.rust
+      }
+    }, editError)));
   })))));
 }
 function Variants({
@@ -3017,16 +3174,16 @@ function Variants({
     };
     v.sku = makeSku(selectedProduct, v);
     v.shortCode = makeShortCode(selectedProduct, variants);
-    setVariants([...variants, v]);
-    setStock({
-      ...stock,
+    setVariants(prev => [...prev, v]);
+    setStock(prevStock => ({
+      ...prevStock,
       [v.id]: {
         opening: Number(opening) || 0,
         in: 0,
         out: 0,
         blocked: 0
       }
-    });
+    }));
     setColorCode("");
     setSeatColor("");
     setHeadrest("No");
@@ -3052,7 +3209,7 @@ function Variants({
   };
   const saveEdit = id => {
     if (!window.confirm("Save changes to this variant?")) return;
-    setVariants(variants.map(v => {
+    setVariants(prev => prev.map(v => {
       if (v.id !== id) return v;
       if (perms.isAdmin) {
         return {
@@ -3076,7 +3233,7 @@ function Variants({
   const remove = id => {
     if (!perms.canDelete) return;
     if (!window.confirm("Delete this variant? Its stock history will stay, but the variant itself will be removed.")) return;
-    setVariants(variants.filter(v => v.id !== id));
+    setVariants(prev => prev.filter(v => v.id !== id));
   };
   const toggleSelect = id => setSelected(prev => {
     const next = new Set(prev);
@@ -3091,7 +3248,7 @@ function Variants({
   const bulkRemove = () => {
     if (!perms.canDelete || selected.size === 0) return;
     if (!window.confirm(`Delete ${selected.size} selected variant${selected.size === 1 ? "" : "s"}? Their stock history will stay, but the variants themselves will be removed.`)) return;
-    setVariants(variants.filter(v => !selected.has(v.id)));
+    setVariants(prev => prev.filter(v => !selected.has(v.id)));
     setSelected(new Set());
   };
   const filtered = variants.filter(v => {
@@ -3733,7 +3890,7 @@ function Reports({
   const cancelEdit = () => setEditingId(null);
   const saveEdit = () => {
     if (!perms.isAdmin) return;
-    setMovements(movements.map(m => m.id === editingId ? {
+    setMovements(prev => prev.map(m => m.id === editingId ? {
       ...m,
       invoice: editInvoice.trim(),
       dc: editDc.trim(),
@@ -4066,7 +4223,7 @@ function ServiceReplacement({
           id: uid(),
           name: newProductName.trim()
         };
-        setServiceProducts([newProduct, ...serviceProducts]);
+        setServiceProducts(prev => [newProduct, ...prev]);
         productId = newProduct.id;
       }
     }
@@ -4099,7 +4256,7 @@ function ServiceReplacement({
       loggedBy: username,
       ts: Date.now()
     };
-    setServiceEntries([entry, ...serviceEntries]);
+    setServiceEntries(prev => [entry, ...prev]);
     setEntryProductId("");
     setNewProductName("");
     setEntryQty(1);
@@ -4109,7 +4266,7 @@ function ServiceReplacement({
   };
   const removeEntry = id => {
     if (!perms.canEditService) return;
-    setServiceEntries(serviceEntries.filter(e => e.id !== id));
+    setServiceEntries(prev => prev.filter(e => e.id !== id));
   };
   const filtered = serviceEntries.filter(e => {
     if (filterProduct && e.productId !== filterProduct) return false;
@@ -4402,7 +4559,7 @@ function Orders({
   const cancelEdit = () => setEditingId(null);
   const saveEdit = () => {
     if (!perms.canManageOrders || !editCustomer.trim()) return;
-    setOrders(orders.map(o => o.id === editingId ? {
+    setOrders(prev => prev.map(o => o.id === editingId ? {
       ...o,
       customer: editCustomer.trim(),
       remark: editRemark.trim()
@@ -4429,19 +4586,19 @@ function Orders({
       }],
       remark: orderRemark.trim()
     };
-    setOrders([order, ...orders]);
-    setStock({
-      ...stock,
+    setOrders(prev => [order, ...prev]);
+    setStock(prevStock => ({
+      ...prevStock,
       [variantId]: {
-        ...(stock[variantId] || {
+        ...(prevStock[variantId] || {
           opening: 0,
           in: 0,
           out: 0,
           blocked: 0
         }),
-        blocked: (stock[variantId]?.blocked || 0) + qn
+        blocked: (prevStock[variantId]?.blocked || 0) + qn
       }
-    });
+    }));
     setCustomer("");
     setVariantId("");
     setQty(1);
@@ -4449,25 +4606,27 @@ function Orders({
   };
   const releaseOrder = order => {
     if (!perms.canManageOrders) return;
-    setOrders(orders.map(o => o.id === order.id ? {
+    setOrders(prev => prev.map(o => o.id === order.id ? {
       ...o,
       status: "RELEASED"
     } : o));
-    const next = {
-      ...stock
-    };
-    order.items.forEach(it => {
-      next[it.variantId] = {
-        ...(next[it.variantId] || {
-          opening: 0,
-          in: 0,
-          out: 0,
-          blocked: 0
-        })
+    setStock(prevStock => {
+      const next = {
+        ...prevStock
       };
-      next[it.variantId].blocked = Math.max(0, (next[it.variantId].blocked || 0) - it.qty);
+      order.items.forEach(it => {
+        next[it.variantId] = {
+          ...(next[it.variantId] || {
+            opening: 0,
+            in: 0,
+            out: 0,
+            blocked: 0
+          })
+        };
+        next[it.variantId].blocked = Math.max(0, (next[it.variantId].blocked || 0) - it.qty);
+      });
+      return next;
     });
-    setStock(next);
   };
   const startConfirm = o => {
     setConfirmingId(o.id);
